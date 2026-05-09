@@ -8,12 +8,21 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
-from config import EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID, TRACK_LAYER_USAGE
+from config import EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID, TRACK_LAYER_USAGE, PRINTER_ID
 from spoolman_client import consumeSpool
-from spoolman_service import fetchSpools, getAMSFromTray, trayUid
+from spoolman_service import fetchSpools, parse_ams_mapping_value, trayUid
 from tools_3mf import download3mfFromCloud, download3mfFromFTP, download3mfFromLocalFilesystem
 from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking
 from logger import log
+from bambu_state import (
+  PRINT_RUN_REGISTRY,
+  extract_gcode_state,
+  extract_prepare_percent,
+  extract_print_status,
+  is_print_active,
+  is_print_final,
+  normalize_prepare_percent,
+)
 
 
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "data" / "checkpoint"
@@ -31,7 +40,6 @@ ABORT_INDICATOR_STATES = {
     "IDLE",
     "FAILED",
 }
-
 
 def _checkpoint_dir() -> Path:
   CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -231,6 +239,9 @@ class FilamentUsageTracker:
     self._layer_tracking_start_time = None
     self._pending_usage_mm = {}
     self._mc_remaining_time_minutes = None
+    self._prepare_percent_normalized = None
+    self._pending_project_file = None
+    self._last_prepare_logged = None
 
   def set_print_metadata(self, metadata: dict | None) -> None:
     metadata = metadata or {}
@@ -253,6 +264,16 @@ class FilamentUsageTracker:
 
     print_obj = message.get("print", {})
     command = print_obj.get("command")
+    gcode_state = extract_gcode_state(message)
+    print_status = extract_print_status(message)
+    raw_prepare = extract_prepare_percent(message)
+    if "gcode_file_prepare_percent" in print_obj:
+      normalized_prepare = normalize_prepare_percent(raw_prepare)
+      self._prepare_percent_normalized = normalized_prepare
+      current_prepare = (raw_prepare, normalized_prepare)
+      if current_prepare != self._last_prepare_logged:
+        log(f"[filament-tracker] prepare_percent raw={raw_prepare!r} normalized={normalized_prepare}")
+        self._last_prepare_logged = current_prepare
     if print_obj.get('gcode_state') is not None:
       log(f"[filament-tracker] on_message command={command} gcode_state={print_obj.get('gcode_state')}")
 
@@ -265,7 +286,11 @@ class FilamentUsageTracker:
         self._mc_remaining_time_minutes = None
 
     if command == "project_file":
-      self._handle_print_start(print_obj)
+      if TRACK_LAYER_USAGE and self.active_model is None:
+        self._handle_print_start(print_obj)
+        self._pending_project_file = None
+      else:
+        self._pending_project_file = print_obj
 
     if command == "push_status":
       if "layer_num" in print_obj:
@@ -275,14 +300,16 @@ class FilamentUsageTracker:
           self._handle_layer_change(layer)
           self.current_layer = layer
 
-    if self.gcode_state == "FINISH" and previous_state != "FINISH" and self.active_model is not None:
-      self._handle_print_end()
+    if is_print_active(gcode_state, print_status):
+      active_run = PRINT_RUN_REGISTRY.get_active_run(PRINTER_ID)
+      if active_run and self.active_model is None and self._pending_project_file:
+        self._handle_print_start(self._pending_project_file)
+        self._pending_project_file = None
 
-    elif (
-        previous_state == "RUNNING"
-        and self._is_abort_state(self.gcode_state)
-        and self.active_model is not None
-    ):
+    if is_print_final(gcode_state, print_status) and self.active_model is not None:
+      if self.gcode_state == "FINISH":
+        self._handle_print_end()
+      else:
         status = (
             LAYER_TRACKING_STATUS_FAILED
             if self.gcode_state == "FAILED"
@@ -298,12 +325,23 @@ class FilamentUsageTracker:
   def _handle_print_start(self, print_obj: dict) -> None:
     log("[filament-tracker] Print start")
 
-    model_url = print_obj.get("url")
-    model_path = self._retrieve_model(model_url)
+    cached_model_path = None
+    if isinstance(self.print_metadata, dict):
+      cached_model_path = self.print_metadata.get("downloaded_model_path")
+
+    if cached_model_path and os.path.exists(cached_model_path):
+      log(f"[filament-tracker] Reusing cached model file: {cached_model_path}")
+      model_path = cached_model_path
+    else:
+      model_url = print_obj.get("url")
+      model_path = self._retrieve_model(model_url)
 
     if model_path is None:
       log("Failed to retrieve model. Print will not be tracked.")
       return
+
+    if isinstance(self.print_metadata, dict) and self.print_metadata.get("downloaded_model_path") == model_path:
+      self.print_metadata.pop("downloaded_model_path", None)
 
     use_ams = bool(print_obj.get("use_ams", False))
     ams_mapping = print_obj.get("ams_mapping", []) if use_ams else None
@@ -581,21 +619,24 @@ class FilamentUsageTracker:
     usage_grams = self._mm_to_grams(total_mm, diameter_mm, density)
 
     usage_rounded = round(total_mm, 5)
-    filament_key = filament + 1
-    previous_grams = self.cumulative_grams_used.get(filament_key, 0.0)
-    self.cumulative_grams_used[filament_key] = previous_grams + usage_grams
-    previous_length = self.cumulative_length_used.get(filament_key, 0.0)
+    filament_id = self._resolve_filament_id(filament)
+    tracking_key = filament_id if filament_id is not None else f"tool_{filament}"
+    previous_grams = self.cumulative_grams_used.get(tracking_key, 0.0)
+    self.cumulative_grams_used[tracking_key] = previous_grams + usage_grams
+    previous_length = self.cumulative_length_used.get(tracking_key, 0.0)
     cumulative_length = previous_length + usage_rounded
-    self.cumulative_length_used[filament_key] = cumulative_length
+    self.cumulative_length_used[tracking_key] = cumulative_length
 
-    grams_rounded = round(self.cumulative_grams_used[filament_key], 2)
+    grams_rounded = round(self.cumulative_grams_used[tracking_key], 2)
     log(f"[filament-tracker] Consume spool {spool_id} for filament {filament} with {usage_rounded}mm ({grams_rounded}g cumulative) (tray_uid={tray_uid})")
 
     consumeSpool(spool_id, use_length=usage_rounded)
 
-    if self.print_id:
-      update_filament_spool(self.print_id, filament_key, spool_id)
-      update_filament_grams_used(self.print_id, filament_key, grams_rounded, length_used=cumulative_length)
+    if self.print_id and filament_id is not None:
+      update_filament_spool(self.print_id, filament_id, spool_id)
+      update_filament_grams_used(self.print_id, filament_id, grams_rounded, length_used=cumulative_length)
+    elif self.print_id and filament_id is None:
+      log(f"[filament-tracker] Skipping print history update for tool {filament}: missing filament_id mapping")
 
     self._filament_spool_id_map[filament] = spool_id
     self._spool_data_cache[spool_id] = spool_data
@@ -714,7 +755,11 @@ class FilamentUsageTracker:
       if spool_id is None:
         continue
 
-      update_filament_spool(self.print_id, filament_index + 1, spool_id)
+      filament_id = self._resolve_filament_id(filament_index)
+      if filament_id is not None:
+        update_filament_spool(self.print_id, filament_id, spool_id)
+      else:
+        log(f"[filament-tracker] Skipping initial spool bind for tool {filament_index}: missing filament_id mapping")
       self._filament_spool_id_map[filament_index] = spool_id
 
       if spool_id not in self._spool_data_cache:
@@ -768,12 +813,12 @@ class FilamentUsageTracker:
       self._layer_tracking_status = status
 
   def _tray_uid_from_mapping(self, mapping_value: int) -> str | None:
-    if mapping_value == EXTERNAL_SPOOL_ID:
+    entry = parse_ams_mapping_value(mapping_value)
+    if entry["source_type"] == "external":
       return trayUid(EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID)
-
-    ams_id = getAMSFromTray(mapping_value)
-    tray_id = mapping_value - ams_id * 4
-    return trayUid(ams_id, tray_id)
+    if entry["source_type"] != "ams":
+      return None
+    return trayUid(entry["ams_id"], entry["slot_id"])
 
   def _resolve_tray_mapping(self, filament_index: int) -> int | None:
     if self.using_ams:
@@ -782,6 +827,33 @@ class FilamentUsageTracker:
         return None
       return self.ams_mapping[filament_index]
     return EXTERNAL_SPOOL_ID
+
+  def _resolve_filament_id(self, filament_index: int) -> int | None:
+    metadata = self.print_metadata or {}
+    tool_to_filament = metadata.get("tool_index_to_filament_id") or {}
+    if tool_to_filament:
+      direct = tool_to_filament.get(filament_index)
+      if direct is None:
+        direct = tool_to_filament.get(str(filament_index))
+      try:
+        return int(direct) if direct is not None else None
+      except (TypeError, ValueError):
+        return None
+
+    filament_id_order = metadata.get("filament_id_order") or []
+    if filament_id_order:
+      try:
+        ordered_ids = [int(fid) for fid in filament_id_order]
+      except (TypeError, ValueError):
+        ordered_ids = []
+      if ordered_ids == sorted(ordered_ids):
+        start = ordered_ids[0] if ordered_ids else 0
+        if ordered_ids == list(range(start, start + len(ordered_ids))):
+          if 0 <= filament_index < len(ordered_ids):
+            return ordered_ids[filament_index]
+      return None
+
+    return filament_index + 1
 
   def _lookup_spool_for_tray(self, tray_uid: str):
     for spool in fetchSpools():
@@ -829,11 +901,11 @@ class FilamentUsageTracker:
     self.cumulative_length_used = {}
     if self.print_id:
       existing_usage = get_all_filament_usage_for_print(self.print_id)
-      for ams_slot, usage in existing_usage.items():
+      for filament_id, usage in existing_usage.items():
         grams_value = usage.get("grams_used") if isinstance(usage, dict) else usage
         length_value = usage.get("length_used") if isinstance(usage, dict) else None
         if grams_value is not None:
-          self.cumulative_grams_used[ams_slot] = grams_value
+          self.cumulative_grams_used[filament_id] = grams_value
         if length_value is not None:
-          self.cumulative_length_used[ams_slot] = length_value
-        log(f"[filament-tracker] Resumed cumulative usage for filament {ams_slot}: {grams_value}g, {length_value or 0}mm")
+          self.cumulative_length_used[filament_id] = length_value
+        log(f"[filament-tracker] Resumed cumulative usage for filament {filament_id}: {grams_value}g, {length_value or 0}mm")

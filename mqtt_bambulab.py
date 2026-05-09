@@ -1,10 +1,13 @@
 
 
 import json
+import os
 import ssl
 import traceback
+from pathlib import Path
 from threading import Thread
 from typing import Any, Iterable
+from urllib.parse import unquote
 
 import paho.mqtt.client as mqtt
 
@@ -26,6 +29,20 @@ from collections.abc import Mapping
 from logger import append_to_rotating_file, log
 from print_history import insert_print, insert_filament_usage
 from filament_usage_tracker import FilamentUsageTracker
+from bambu_state import (
+  Features,
+  MODEL_FEATURES,
+  PRINT_RUN_REGISTRY,
+  extract_gcode_state,
+  extract_prepare_percent,
+  extract_print_status,
+  get_job_label,
+  get_printer_model_name,
+  is_prepare_ready_for_early_download,
+  is_print_active,
+  is_print_final,
+  normalize_prepare_percent,
+)
 MQTT_CLIENT = {}  # Global variable storing MQTT Client
 MQTT_CLIENT_CONNECTED = False
 MQTT_KEEPALIVE = 60
@@ -36,7 +53,21 @@ PRINTER_STATE_LAST = {}
 
 PENDING_PRINT_METADATA = {}
 FILAMENT_TRACKER = FilamentUsageTracker()
-LOG_FILE = "/home/app/logs/mqtt.log"
+LAST_LAN_PROJECT = {}
+LOG_FILE = os.getenv("OPENSPOOLMAN_MQTT_LOG_PATH", "/home/app/logs/mqtt.log")
+_LOG_WRITE_FAILED = False
+PENDING_PRINT_REFERENCE = {}
+PRINTER_MODEL_NAME = get_printer_model_name(PRINTER_ID)
+LAST_PREPARE_LOGGED = object()
+
+def _build_model_cache_path(printer_id: str) -> Path:
+  safe_printer_id = "".join(
+    char if char.isalnum() or char in ("-", "_") else "_"
+    for char in str(printer_id or "unknown")
+  )
+  return Path(__file__).resolve().parent / "data" / "cache" / f"{safe_printer_id}.3mf"
+
+MODEL_CACHE_PATH = _build_model_cache_path(PRINTER_ID)
 
 def getPrinterModel():
     global PRINTER_ID
@@ -164,6 +195,61 @@ def _parse_grams(value):
   except (TypeError, ValueError):
     return None
 
+def _is_lan_project_url(url: str | None) -> bool:
+  if not url:
+    return False
+  return not url.startswith("http")
+
+def _is_valid_print_id(value: Any) -> bool:
+  if value is None:
+    return False
+  if isinstance(value, str) and not value.strip():
+    return False
+  try:
+    return int(value) != 0
+  except (TypeError, ValueError):
+    return True
+
+def _normalize_print_file_label(label: Any) -> str | None:
+  if not isinstance(label, str):
+    return None
+  normalized = unquote(label.strip())
+  if not normalized:
+    return None
+  normalized = normalized.replace("\\", "/").rsplit("/", 1)[-1]
+  lowered = normalized.lower()
+  for suffix in (".gcode.3mf", ".3mf", ".gcode"):
+    if lowered.endswith(suffix):
+      normalized = normalized[: -len(suffix)]
+      break
+  normalized = normalized.strip().lower()
+  return normalized or None
+
+def _matches_print_identity(print_state: dict, identity: dict) -> bool:
+  if not print_state or not identity:
+    return False
+  if _is_valid_print_id(identity.get("task_id")) and _is_valid_print_id(print_state.get("task_id")):
+    if str(identity.get("task_id")) == str(print_state.get("task_id")):
+      return True
+  if _is_valid_print_id(identity.get("subtask_id")) and _is_valid_print_id(print_state.get("subtask_id")):
+    if str(identity.get("subtask_id")) == str(print_state.get("subtask_id")):
+      return True
+  identity_file = identity.get("file") or identity.get("gcode_file") or identity.get("subtask_name")
+  state_file = print_state.get("gcode_file") or print_state.get("subtask_name")
+  normalized_identity_file = _normalize_print_file_label(identity_file)
+  normalized_state_file = _normalize_print_file_label(state_file)
+  if normalized_identity_file and normalized_state_file:
+    return normalized_identity_file == normalized_state_file
+  return bool(identity_file and state_file and identity_file == state_file)
+
+def _lan_project_is_active(identity: dict) -> bool:
+  if not identity:
+    return False
+  timestamp = identity.get("timestamp")
+  if not timestamp:
+    return False
+  return (time.time() - timestamp) < (6 * 60 * 60)
+
 def _mask_serial(serial: str | None, keep_chars: int = 3) -> str:
   if not serial:
     return ""
@@ -197,16 +283,118 @@ def _mask_mqtt_payload(payload: str) -> str:
 
   return masked
 
+
+def iter_mqtt_payloads_from_lines(lines: Iterable[str]) -> Iterable[dict[str, Any]]:
+  """Yield decoded MQTT payloads from log lines (format: '<timestamp> :: <json>')."""
+  for line in lines:
+    if "::" not in line:
+      continue
+    payload_raw = line.split("::", 1)[1].strip()
+    if not payload_raw:
+      continue
+    try:
+      payload = json.loads(payload_raw)
+    except (TypeError, ValueError):
+      continue
+    if isinstance(payload, dict):
+      yield payload
+
+
+def iter_mqtt_payloads_from_log(log_path: str | Path) -> Iterable[dict[str, Any]]:
+  """Yield decoded MQTT payloads from a saved mqtt.log file."""
+  path = Path(log_path)
+  with path.open("r", encoding="utf-8") as handle:
+    yield from iter_mqtt_payloads_from_lines(handle)
+
+
+def replay_mqtt_payloads(payloads: Iterable[dict[str, Any]]) -> None:
+  """Replay decoded MQTT payloads through the on_message handler."""
+  for payload in payloads:
+    msg = type("ReplayMsg", (), {"payload": json.dumps(payload).encode("utf-8")})()
+    on_message(None, None, msg)
+
+
+def replay_mqtt_log(log_path: str | Path) -> None:
+  """Replay an mqtt.log file through the on_message handler."""
+  replay_mqtt_payloads(iter_mqtt_payloads_from_log(log_path))
+
+def _cleanup_cached_download(metadata: dict | None, skip_path: str | None = None) -> None:
+  if not metadata:
+    return
+  cached_model_path = metadata.get("downloaded_model_path")
+  if not cached_model_path:
+    return
+  if skip_path and cached_model_path == skip_path:
+    return
+  try:
+    os.remove(cached_model_path)
+  except FileNotFoundError:
+    return
+  except OSError as exc:
+    log(f"[WARNING] Failed to remove cached model file {cached_model_path!r}: {exc}")
+
+def _set_pending_print_metadata(metadata: dict | None) -> None:
+  global PENDING_PRINT_METADATA
+  if metadata is PENDING_PRINT_METADATA:
+    return
+  next_cached_path = metadata.get("downloaded_model_path") if isinstance(metadata, dict) else None
+  _cleanup_cached_download(PENDING_PRINT_METADATA, skip_path=next_cached_path)
+  PENDING_PRINT_METADATA = metadata or {}
+
+def _cleanup_startup_model_cache() -> None:
+  try:
+    os.remove(MODEL_CACHE_PATH)
+    log(f"[DEBUG] Removed stale startup model cache: {MODEL_CACHE_PATH}")
+  except FileNotFoundError:
+    return
+  except OSError as exc:
+    log(f"[WARNING] Failed to remove startup model cache {str(MODEL_CACHE_PATH)!r}: {exc}")
+
+
+_cleanup_startup_model_cache()
+
+def _maybe_download_metadata(source: str | None, reason: str) -> dict | None:
+  if not source:
+    log(f"[DEBUG] Metadata download skipped: no source ({reason}).")
+    return None
+  try:
+    metadata = getMetaDataFrom3mf(
+      source,
+      keep_downloaded_file=TRACK_LAYER_USAGE,
+      downloaded_file_path=str(MODEL_CACHE_PATH) if TRACK_LAYER_USAGE else None,
+    )
+    if metadata:
+      log(f"[DEBUG] Metadata downloaded for {reason} from {source}")
+    return metadata
+  except TypeError as exc:
+    # Compatibility fallback for tests/patches that still stub an older signature.
+    if "downloaded_file_path" in str(exc):
+      metadata = getMetaDataFrom3mf(source, keep_downloaded_file=TRACK_LAYER_USAGE)
+    elif "keep_downloaded_file" in str(exc):
+      metadata = getMetaDataFrom3mf(source)
+    else:
+      raise
+    if metadata:
+      log(f"[DEBUG] Metadata downloaded for {reason} from {source}")
+    return metadata
+  except Exception as exc:
+    log(f"[WARNING] Metadata download failed ({reason}): {exc}")
+    return None
+
 def map_filament(tray_tar):
   global PENDING_PRINT_METADATA
   # Prüfen, ob ein Filamentwechsel aktiv ist (stg_cur == 4)
   #if stg_cur == 4 and tray_tar is not None:
   if PENDING_PRINT_METADATA:
-    PENDING_PRINT_METADATA["filamentChanges"].append(tray_tar)  # Jeder Wechsel zählt, auch auf das gleiche Tray
-    log(f'Filamentchange {len(PENDING_PRINT_METADATA["filamentChanges"])}: Tray {tray_tar}')
+    if not PENDING_PRINT_METADATA.get("use_ams", True):
+      return False
+
+    filament_changes = PENDING_PRINT_METADATA.setdefault("filamentChanges", [])
+    filament_changes.append(tray_tar)  # Jeder Wechsel zählt, auch auf das gleiche Tray
+    log(f'Filamentchange {len(filament_changes)}: Tray {tray_tar}')
 
     # Anzahl der erkannten Wechsel
-    change_count = len(PENDING_PRINT_METADATA["filamentChanges"]) - 1  # -1, weil der erste Eintrag kein Wechsel ist
+    change_count = len(filament_changes) - 1  # -1, weil der erste Eintrag kein Wechsel ist
 
     filament_order = PENDING_PRINT_METADATA.get("filamentOrder") or {}
     ordered_filaments = sorted(filament_order.items(), key=lambda entry: entry[1])
@@ -225,8 +413,14 @@ def map_filament(tray_tar):
 
     if filament_assigned is not None:
       mapping = PENDING_PRINT_METADATA.setdefault("ams_mapping", [])
-      filament_idx = int(filament_assigned)
-      while len(mapping) <= filament_idx:
+      try:
+        filament_idx = int(filament_assigned)
+      except (TypeError, ValueError):
+        filament_idx = None
+      if filament_idx is None:
+        return False
+      mapping_index = filament_idx
+      while len(mapping) <= mapping_index:
         mapping.append(None)
       mapping[filament_idx] = tray_tar
       log(f"✅ Tray {tray_tar} assigned to Filament {filament_assigned}")
@@ -236,7 +430,11 @@ def map_filament(tray_tar):
           continue
         log(f"  Filament pos: {filament} → Tray {tray}")
 
-    target_filaments = set(filament_order.keys())
+    target_filaments_raw = set(filament_order.keys())
+    if target_filaments_raw and all(str(key).isdigit() for key in target_filaments_raw):
+      target_filaments = {int(key) for key in target_filaments_raw}
+    else:
+      target_filaments = target_filaments_raw
     if target_filaments:
       assigned_filaments = {
         idx for idx, tray in enumerate(PENDING_PRINT_METADATA.get("ams_mapping", []))
@@ -249,105 +447,240 @@ def map_filament(tray_tar):
   return False
   
 def processMessage(data):
-  global LAST_AMS_CONFIG, PRINTER_STATE, PRINTER_STATE_LAST, PENDING_PRINT_METADATA
+  global LAST_AMS_CONFIG, PRINTER_STATE, PRINTER_STATE_LAST, PENDING_PRINT_METADATA, LAST_LAN_PROJECT
+  global PENDING_PRINT_REFERENCE
+  global LAST_PREPARE_LOGGED
 
    # Prepare AMS spending estimation
   if "print" in data:    
+    data = copy.deepcopy(data)
     update_dict(PRINTER_STATE, data)
-    
-    if data["print"].get("command") == "project_file" and data["print"].get("url"):
-      PENDING_PRINT_METADATA = getMetaDataFrom3mf(data["print"]["url"])
-      PENDING_PRINT_METADATA["print_type"] = PRINTER_STATE["print"].get("print_type")
-      PENDING_PRINT_METADATA["task_id"] = PRINTER_STATE["print"].get("task_id")
-      PENDING_PRINT_METADATA["subtask_id"] = PRINTER_STATE["print"].get("subtask_id")
-      if TRACK_LAYER_USAGE:
-        FILAMENT_TRACKER.set_print_metadata(PENDING_PRINT_METADATA)
+    print_block = PRINTER_STATE.get("print", {})
+    incoming_print = data.get("print", {})
+    gcode_state = extract_gcode_state(data)
+    print_status = extract_print_status(data)
+    job_label = get_job_label(data)
+    raw_prepare_percent = extract_prepare_percent(data)
+    normalized_prepare_percent = normalize_prepare_percent(raw_prepare_percent)
+    if "gcode_file_prepare_percent" in incoming_print:
+      current_prepare = (raw_prepare_percent, normalized_prepare_percent)
+      if current_prepare != LAST_PREPARE_LOGGED:
+        log(f"[DEBUG] prepare_percent raw={raw_prepare_percent!r} normalized={normalized_prepare_percent}")
+        LAST_PREPARE_LOGGED = current_prepare
 
-      print_id = insert_print(PRINTER_STATE["print"]["subtask_name"], "cloud", PENDING_PRINT_METADATA["image"])
+    active_now = is_print_active(gcode_state, print_status)
+    final_now = is_print_final(gcode_state, print_status)
+    supports_early = Features.SUPPORTS_EARLY_FTP_DOWNLOAD in MODEL_FEATURES.get(PRINTER_MODEL_NAME, set())
+    early_ready = active_now or is_prepare_ready_for_early_download(normalized_prepare_percent)
 
-      if PRINTER_STATE["print"].get("use_ams"):
-        PENDING_PRINT_METADATA["ams_mapping"] = PRINTER_STATE["print"]["ams_mapping"]
-      else:
-        PENDING_PRINT_METADATA["ams_mapping"] = [EXTERNAL_SPOOL_ID]
+    if incoming_print.get("command") == "project_file" and incoming_print.get("url"):
+      log(
+        "[print] Incoming print command: "
+        f"url={incoming_print.get('url')}, "
+        f"gcode_file={incoming_print.get('gcode_file')}, "
+        f"print_type={incoming_print.get('print_type')}, "
+        f"task_id={incoming_print.get('task_id')}, "
+        f"subtask_id={incoming_print.get('subtask_id')}, "
+        f"use_ams={incoming_print.get('use_ams')}, "
+        f"ams_mapping={incoming_print.get('ams_mapping')}"
+      )
+      is_lan_project = _is_lan_project_url(incoming_print.get("url"))
+      history_print_type = "lan" if is_lan_project else "cloud"
+      job_label = get_job_label(data)
+      PENDING_PRINT_REFERENCE = {
+        "url": incoming_print.get("url"),
+        "gcode_file": incoming_print.get("gcode_file"),
+        "task_id": incoming_print.get("task_id"),
+        "subtask_id": incoming_print.get("subtask_id"),
+        "print_type": incoming_print.get("print_type"),
+        "use_ams": incoming_print.get("use_ams"),
+        "ams_mapping": incoming_print.get("ams_mapping"),
+        "subtask_name": incoming_print.get("subtask_name"),
+        "history_print_type": history_print_type,
+        "job_label": job_label,
+      }
+      if is_lan_project:
+        LAST_LAN_PROJECT = {
+          "task_id": incoming_print.get("task_id"),
+          "subtask_id": incoming_print.get("subtask_id"),
+          "file": incoming_print.get("gcode_file") or incoming_print.get("subtask_name"),
+          "timestamp": time.time(),
+        }
 
-      PENDING_PRINT_METADATA["print_id"] = print_id
-      PENDING_PRINT_METADATA["complete"] = True
+      if not PENDING_PRINT_METADATA:
+        metadata = _maybe_download_metadata(incoming_print.get("url"), "project-file")
+        if metadata:
+          _set_pending_print_metadata(metadata)
+          PENDING_PRINT_METADATA["print_type"] = history_print_type
+          PENDING_PRINT_METADATA["task_id"] = incoming_print.get("task_id")
+          PENDING_PRINT_METADATA["subtask_id"] = incoming_print.get("subtask_id")
+          if TRACK_LAYER_USAGE:
+            FILAMENT_TRACKER.set_print_metadata(PENDING_PRINT_METADATA)
+          print_id = insert_print(
+            incoming_print.get("subtask_name") or PENDING_PRINT_METADATA.get("file") or "Print",
+            history_print_type,
+            PENDING_PRINT_METADATA.get("image"),
+          )
+          PENDING_PRINT_METADATA["print_id"] = print_id
+          if incoming_print.get("use_ams"):
+            PENDING_PRINT_METADATA["ams_mapping"] = incoming_print.get("ams_mapping") or []
+          else:
+            PENDING_PRINT_METADATA["ams_mapping"] = [EXTERNAL_SPOOL_ID]
+          PENDING_PRINT_METADATA["use_ams"] = bool(incoming_print.get("use_ams"))
+          PENDING_PRINT_METADATA["complete"] = True
+          PENDING_PRINT_REFERENCE["print_id"] = print_id
+          PENDING_PRINT_REFERENCE["history_created"] = True
+          PENDING_PRINT_REFERENCE["accounted"] = True
+          PENDING_PRINT_REFERENCE["metadata"] = PENDING_PRINT_METADATA
 
-      for id, filament in PENDING_PRINT_METADATA["filaments"].items():
-        parsed_grams = _parse_grams(filament.get("used_g"))
-        parsed_length_m = _parse_grams(filament.get("used_m"))
-        estimated_length_mm = parsed_length_m * 1000 if parsed_length_m is not None else None
-        grams_used = parsed_grams if parsed_grams is not None else 0.0
-        length_used = estimated_length_mm if estimated_length_mm is not None else 0.0
-        if TRACK_LAYER_USAGE:
-          grams_used = 0.0
-          length_used = 0.0
-        insert_filament_usage(
-            print_id,
-            filament["type"],
-            filament["color"],
-            grams_used,
-            id,
-            estimated_grams=parsed_grams,
-            length_used=length_used,
-            estimated_length=estimated_length_mm,
+          for id, filament in PENDING_PRINT_METADATA.get("filaments", {}).items():
+            parsed_grams = _parse_grams(filament.get("used_g"))
+            parsed_length_m = _parse_grams(filament.get("used_m"))
+            estimated_length_mm = parsed_length_m * 1000 if parsed_length_m is not None else None
+            grams_used = parsed_grams if parsed_grams is not None else 0.0
+            length_used = estimated_length_mm if estimated_length_mm is not None else 0.0
+            if TRACK_LAYER_USAGE:
+              grams_used = 0.0
+              length_used = 0.0
+            insert_filament_usage(
+                print_id,
+                filament["type"],
+                filament["color"],
+                grams_used,
+                id,
+                estimated_grams=parsed_grams,
+                length_used=length_used,
+                estimated_length=estimated_length_mm,
+            )
+
+    if supports_early and early_ready and job_label and not PENDING_PRINT_METADATA:
+      if PRINT_RUN_REGISTRY.mark_early_download_started(PRINTER_ID, job_label):
+        metadata = _maybe_download_metadata(job_label, "early-download")
+        if metadata:
+          _set_pending_print_metadata(metadata)
+          if PENDING_PRINT_REFERENCE:
+            PENDING_PRINT_REFERENCE["metadata"] = PENDING_PRINT_METADATA
+          if PENDING_PRINT_REFERENCE:
+            PENDING_PRINT_METADATA["task_id"] = PENDING_PRINT_REFERENCE.get("task_id")
+            PENDING_PRINT_METADATA["subtask_id"] = PENDING_PRINT_REFERENCE.get("subtask_id")
+            PENDING_PRINT_METADATA["print_type"] = PENDING_PRINT_REFERENCE.get("print_type")
+
+    if active_now:
+      if PRINT_RUN_REGISTRY.can_start_new_run(PRINTER_ID):
+        PRINT_RUN_REGISTRY.start_run(PRINTER_ID, job_label, data)
+
+        existing_print_id = None
+        if PENDING_PRINT_REFERENCE and PENDING_PRINT_REFERENCE.get("print_id"):
+          if _matches_print_identity(print_block, PENDING_PRINT_REFERENCE):
+            existing_print_id = PENDING_PRINT_REFERENCE.get("print_id")
+          elif not (print_block.get("task_id") or print_block.get("subtask_id")):
+            existing_print_id = PENDING_PRINT_REFERENCE.get("print_id")
+
+        source = (
+          (PENDING_PRINT_REFERENCE or {}).get("url")
+          or (PENDING_PRINT_REFERENCE or {}).get("gcode_file")
+          or print_block.get("url")
+          or print_block.get("gcode_file")
+          or job_label
         )
-  
+        history_print_type = (
+          print_block.get("print_type")
+          or (PENDING_PRINT_REFERENCE or {}).get("history_print_type")
+          or ("lan" if _is_lan_project_url(source) else "cloud")
+        )
+        if not PENDING_PRINT_METADATA:
+          if PENDING_PRINT_REFERENCE and PENDING_PRINT_REFERENCE.get("metadata"):
+            _set_pending_print_metadata(PENDING_PRINT_REFERENCE.get("metadata") or {})
+          else:
+            _set_pending_print_metadata(_maybe_download_metadata(source, "print-start") or {})
+
+        if PENDING_PRINT_METADATA:
+          PENDING_PRINT_METADATA["print_type"] = history_print_type
+          PENDING_PRINT_METADATA["task_id"] = print_block.get("task_id")
+          PENDING_PRINT_METADATA["subtask_id"] = print_block.get("subtask_id")
+
+          use_ams_raw = print_block.get("use_ams", (PENDING_PRINT_REFERENCE or {}).get("use_ams"))
+          ams_mapping = print_block.get("ams_mapping") or (PENDING_PRINT_REFERENCE or {}).get("ams_mapping")
+          if use_ams_raw is None:
+            use_ams = history_print_type == "local"
+          elif isinstance(use_ams_raw, str):
+            use_ams = use_ams_raw.strip().lower() in ("1", "true", "yes", "on")
+          else:
+            use_ams = bool(use_ams_raw)
+          PENDING_PRINT_METADATA["use_ams"] = use_ams
+
+          if history_print_type == "local":
+            PENDING_PRINT_METADATA.setdefault("ams_mapping", [])
+            PENDING_PRINT_METADATA["filamentChanges"] = []
+            PENDING_PRINT_METADATA["assigned_trays"] = []
+            PENDING_PRINT_METADATA["complete"] = False
+          else:
+            if use_ams:
+              PENDING_PRINT_METADATA["ams_mapping"] = ams_mapping or []
+            else:
+              PENDING_PRINT_METADATA["ams_mapping"] = [EXTERNAL_SPOOL_ID]
+            PENDING_PRINT_METADATA["complete"] = True
+
+          if not PENDING_PRINT_METADATA.get("tracking_started"):
+            if existing_print_id:
+              print_id = existing_print_id
+              PENDING_PRINT_METADATA["print_id"] = print_id
+              if PENDING_PRINT_REFERENCE and PENDING_PRINT_REFERENCE.get("accounted"):
+                PENDING_PRINT_METADATA["skip_spend"] = True
+            else:
+              print_id = insert_print(
+                PENDING_PRINT_METADATA.get("file") or print_block.get("subtask_name") or "Print",
+                history_print_type,
+                PENDING_PRINT_METADATA.get("image"),
+              )
+              PENDING_PRINT_METADATA["print_id"] = print_id
+
+              for id, filament in PENDING_PRINT_METADATA.get("filaments", {}).items():
+                parsed_grams = _parse_grams(filament.get("used_g"))
+                parsed_length_m = _parse_grams(filament.get("used_m"))
+                estimated_length_mm = parsed_length_m * 1000 if parsed_length_m is not None else None
+                grams_used = parsed_grams if parsed_grams is not None else 0.0
+                length_used = estimated_length_mm if estimated_length_mm is not None else 0.0
+                if TRACK_LAYER_USAGE:
+                  grams_used = 0.0
+                  length_used = 0.0
+                insert_filament_usage(
+                    print_id,
+                    filament["type"],
+                    filament["color"],
+                    grams_used,
+                    id,
+                    estimated_grams=parsed_grams,
+                    length_used=length_used,
+                    estimated_length=estimated_length_mm,
+                )
+
+            if history_print_type == "local":
+              FILAMENT_TRACKER.start_local_print_from_metadata(PENDING_PRINT_METADATA)
+            elif TRACK_LAYER_USAGE:
+              FILAMENT_TRACKER.set_print_metadata(PENDING_PRINT_METADATA)
+
+            PENDING_PRINT_METADATA["tracking_started"] = True
+
+          PENDING_PRINT_REFERENCE = {}
+      else:
+        PRINT_RUN_REGISTRY.update_run(PRINTER_ID, data)
+
+    if final_now:
+      PRINT_RUN_REGISTRY.finalize_run(PRINTER_ID, data)
+      if PENDING_PRINT_METADATA:
+        _set_pending_print_metadata({})
+
     #if ("gcode_state" in data["print"] and data["print"]["gcode_state"] == "RUNNING") and ("print_type" in data["print"] and data["print"]["print_type"] != "local") \
     #  and ("tray_tar" in data["print"] and data["print"]["tray_tar"] != "255") and ("stg_cur" in data["print"] and data["print"]["stg_cur"] == 0 and PRINT_CURRENT_STAGE != 0):
     
     #TODO: What happens when printed from external spool, is ams and tray_tar set?
     if PRINTER_STATE.get("print", {}).get("print_type") == "local" and PRINTER_STATE_LAST.get("print"):
-
-      if (
-          PRINTER_STATE["print"].get("gcode_state") == "RUNNING" and
-          PRINTER_STATE_LAST["print"].get("gcode_state") == "PREPARE" and 
-          PRINTER_STATE["print"].get("gcode_file")
-        ):
-
-        if not PENDING_PRINT_METADATA:
-          PENDING_PRINT_METADATA = getMetaDataFrom3mf(PRINTER_STATE["print"]["gcode_file"])
-        if PENDING_PRINT_METADATA:
-          PENDING_PRINT_METADATA["print_type"] = PRINTER_STATE["print"].get("print_type")
-          PENDING_PRINT_METADATA["task_id"] = PRINTER_STATE["print"].get("task_id")
-          PENDING_PRINT_METADATA["subtask_id"] = PRINTER_STATE["print"].get("subtask_id")
-
-          if not PENDING_PRINT_METADATA.get("tracking_started"):
-            print_id = insert_print(PENDING_PRINT_METADATA["file"], PRINTER_STATE["print"]["print_type"], PENDING_PRINT_METADATA["image"])
-
-            PENDING_PRINT_METADATA["ams_mapping"] = []
-            PENDING_PRINT_METADATA["filamentChanges"] = []
-            PENDING_PRINT_METADATA["assigned_trays"] = []
-            PENDING_PRINT_METADATA["complete"] = False
-            PENDING_PRINT_METADATA["print_id"] = print_id
-            FILAMENT_TRACKER.start_local_print_from_metadata(PENDING_PRINT_METADATA)
-
-            for id, filament in PENDING_PRINT_METADATA["filaments"].items():
-              parsed_grams = _parse_grams(filament.get("used_g"))
-              parsed_length_m = _parse_grams(filament.get("used_m"))
-              estimated_length_mm = parsed_length_m * 1000 if parsed_length_m is not None else None
-              grams_used = parsed_grams if parsed_grams is not None else 0.0
-              length_used = estimated_length_mm if estimated_length_mm is not None else 0.0
-              if TRACK_LAYER_USAGE:
-                grams_used = 0.0
-                length_used = 0.0
-              insert_filament_usage(
-                  print_id,
-                  filament["type"],
-                  filament["color"],
-                  grams_used,
-                  id,
-                  estimated_grams=parsed_grams,
-                  length_used=length_used,
-                  estimated_length=estimated_length_mm,
-              )
-
-            PENDING_PRINT_METADATA["tracking_started"] = True
-
-        #TODO 
-    
+      should_handle_local_ams_mapping = not (
+        PENDING_PRINT_METADATA and not PENDING_PRINT_METADATA.get("use_ams", True)
+      )
       # When stage changed to "change filament" and PENDING_PRINT_METADATA is set
-      if (PENDING_PRINT_METADATA and 
+      if (should_handle_local_ams_mapping and PENDING_PRINT_METADATA and 
           (
             (
               int(PRINTER_STATE["print"].get("stg_cur", -1)) == 4 and      # change filament stage (beginning of print)
@@ -389,7 +722,7 @@ def processMessage(data):
             if mapped:
                 PENDING_PRINT_METADATA["complete"] = True
 
-    if PENDING_PRINT_METADATA and PENDING_PRINT_METADATA.get("complete"):
+    if PENDING_PRINT_METADATA and PENDING_PRINT_METADATA.get("complete") and not PENDING_PRINT_METADATA.get("skip_spend"):
       if TRACK_LAYER_USAGE:
         if PENDING_PRINT_METADATA.get("print_type") == "local":
           FILAMENT_TRACKER.apply_ams_mapping(PENDING_PRINT_METADATA.get("ams_mapping") or [])
@@ -399,7 +732,16 @@ def processMessage(data):
       else:
         spendFilaments(PENDING_PRINT_METADATA)
 
-      PENDING_PRINT_METADATA = {}
+        _set_pending_print_metadata({})
+
+    if _lan_project_is_active(LAST_LAN_PROJECT) and _matches_print_identity(PRINTER_STATE.get("print", {}), LAST_LAN_PROJECT):
+      if (
+        PRINTER_STATE.get("print", {}).get("gcode_state") == "IDLE"
+        and PRINTER_STATE_LAST.get("print", {}).get("gcode_state") not in (None, "IDLE")
+      ):
+        LAST_LAN_PROJECT = {}
+    elif LAST_LAN_PROJECT and not _lan_project_is_active(LAST_LAN_PROJECT):
+      LAST_LAN_PROJECT = {}
   
     PRINTER_STATE_LAST = copy.deepcopy(PRINTER_STATE)
 
@@ -450,7 +792,13 @@ def on_message(client, userdata, msg):
       }
 
     if "print" in data:
-      append_to_rotating_file("/home/app/logs/mqtt.log", _mask_mqtt_payload(msg.payload.decode()))
+      global _LOG_WRITE_FAILED
+      if LOG_FILE and not _LOG_WRITE_FAILED:
+        try:
+          append_to_rotating_file(LOG_FILE, _mask_mqtt_payload(msg.payload.decode()))
+        except OSError as exc:
+          _LOG_WRITE_FAILED = True
+          log(f"[WARNING] Failed to write MQTT log to {LOG_FILE!r}: {exc}")
 
     #print(data)
 

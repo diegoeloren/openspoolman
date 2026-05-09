@@ -68,8 +68,123 @@ def get_currency_symbol(code):
 def trayUid(ams_id, tray_id):
   return f"{PRINTER_ID}_{ams_id}_{tray_id}"
 
+def parse_ams_mapping_value(value):
+  """
+  Parse a single AMS mapping value into a normalized structure.
+
+  Heuristic based on ha-bambulab semantics:
+  - 255 -> unload
+  - 254 -> external/bypass
+  - v >= 512 -> encoded (ams_id = v // 4, slot_id = v % 4)
+  - 128 <= v < 256 -> direct HT AMS id (ams_id = v, slot_id = 0)
+  - v < 128 -> encoded (ams_id = v // 4, slot_id = v % 4)
+  - 256 <= v < 512 -> encoded (ams_id = v // 4, slot_id = v % 4) with warning
+  """
+  result = {"source_type": "unknown", "ams_id": None, "slot_id": None}
+  try:
+    v = int(value)
+  except (TypeError, ValueError):
+    return result
+
+  if v < 0:
+    result["source_type"] = "unused"
+    return result
+
+  if v == 255:
+    result["source_type"] = "unload"
+    return result
+  if v == 254:
+    result["source_type"] = "external"
+    return result
+
+  if v >= 512:
+    ams_id = v // 4
+    slot_id = v % 4
+    return {"source_type": "ams", "ams_id": ams_id, "slot_id": slot_id}
+
+  if 128 <= v < 256:
+    return {"source_type": "ams", "ams_id": v, "slot_id": 0}
+
+  ams_id = v // 4
+  slot_id = v % 4
+  if v >= 256:
+    log(f"[WARNING] AMS mapping value {v} is outside expected ranges; treating as encoded.")
+  return {"source_type": "ams", "ams_id": ams_id, "slot_id": slot_id}
+
+
+def _coerce_int(value):
+  try:
+    return int(value)
+  except (TypeError, ValueError):
+    return None
+
+
+def _is_sequential_ids(values: list[int]) -> bool:
+  if not values:
+    return False
+  sorted_values = sorted(values)
+  start = sorted_values[0]
+  return sorted_values == list(range(start, start + len(sorted_values)))
+
+
+def _resolve_tool_index_for_filament(printdata: dict, filament_id) -> int | None:
+  filament_id_int = _coerce_int(filament_id)
+  filament_to_tool = printdata.get("filament_id_to_tool_index") or {}
+  if filament_to_tool:
+    direct = filament_to_tool.get(filament_id_int)
+    if direct is None:
+      direct = filament_to_tool.get(str(filament_id_int))
+    if direct is not None:
+      return _coerce_int(direct)
+
+  filament_id_order = printdata.get("filament_id_order") or []
+  if filament_id_order and filament_id_int is not None:
+    try:
+      ordered_ids = [_coerce_int(fid) for fid in filament_id_order]
+    except Exception:
+      ordered_ids = []
+    if all(val is not None for val in ordered_ids):
+      ordered_ids = [val for val in ordered_ids if val is not None]
+      if ordered_ids == sorted(ordered_ids) and _is_sequential_ids(ordered_ids):
+        if filament_id_int in ordered_ids:
+          return ordered_ids.index(filament_id_int)
+      return None
+
+  if not filament_id_order and filament_id_int is not None:
+    return filament_id_int - 1
+  return None
+
+def parse_ams_mapping(ams_mapping, ams_mapping2=None):
+  if not ams_mapping:
+    return []
+
+  parsed = []
+  compare = isinstance(ams_mapping2, list) and len(ams_mapping2) == len(ams_mapping)
+
+  for idx, raw in enumerate(ams_mapping):
+    entry = parse_ams_mapping_value(raw)
+    parsed.append(entry)
+    if compare:
+      expected = ams_mapping2[idx]
+      if isinstance(expected, dict):
+        expected_ams_id = expected.get("ams_id")
+        expected_slot_id = expected.get("slot_id")
+      else:
+        expected_ams_id = None
+        expected_slot_id = None
+      if entry["ams_id"] != expected_ams_id or entry["slot_id"] != expected_slot_id:
+        log(
+          "[WARNING] AMS mapping mismatch "
+          f"(filament_index={idx}, raw={raw}, parsed={entry}, expected={{'ams_id': {expected_ams_id}, 'slot_id': {expected_slot_id}}})"
+        )
+
+  return parsed
+
 def getAMSFromTray(n):
-    return n // 4
+  parsed = parse_ams_mapping_value(n)
+  if parsed["source_type"] == "ams":
+    return parsed["ams_id"]
+  return EXTERNAL_SPOOL_AMS_ID
 
 
 def normalize_color_hex(color_hex):
@@ -384,7 +499,8 @@ def spendFilaments(printdata):
     ams_mapping = printdata["ams_mapping"]
   else:
     ams_mapping = [EXTERNAL_SPOOL_ID]
-
+  parsed_mapping = parse_ams_mapping(ams_mapping, printdata.get("ams_mapping2"))
+  external_default = bool(ams_mapping) and ams_mapping[0] == EXTERNAL_SPOOL_ID
   """
   "ams_mapping": [
             1,
@@ -396,20 +512,37 @@ def spendFilaments(printdata):
             0
         ],
   """
-  tray_id = EXTERNAL_SPOOL_ID
-  ams_id = EXTERNAL_SPOOL_AMS_ID
-  
   ams_usage = []
   for filamentId, filament in printdata["filaments"].items():
-    if ams_mapping[0] != EXTERNAL_SPOOL_ID:
-      tray_id = ams_mapping[filamentId - 1]   # get tray_id from ams_mapping for filament
-      ams_id = getAMSFromTray(tray_id)        # caclulate ams_id from tray_id
-      tray_id = tray_id - ams_id * 4          # correct tray_id for ams
-    
-    #if ams_usage.get(trayUid(ams_id, tray_id)):
-    #    ams_usage[trayUid(ams_id, tray_id)]["usedGrams"] += float(filament["used_g"])
-    #else:
-    ams_usage.append({"trayUid": trayUid(ams_id, tray_id), "id": filamentId, "usedGrams":float(filament["used_g"])})
+    try:
+      filament_id = int(filamentId)
+    except (TypeError, ValueError):
+      filament_id = filamentId
+
+    if external_default:
+      entry = {"source_type": "external", "ams_id": None, "slot_id": None}
+    else:
+      index = _resolve_tool_index_for_filament(printdata, filament_id)
+      if index is None:
+        log(f"[WARNING] Skipping filament usage for filament {filament_id} due to missing tool index mapping")
+        continue
+      entry = (
+        parsed_mapping[index]
+        if 0 <= index < len(parsed_mapping)
+        else {"source_type": "unknown", "ams_id": None, "slot_id": None}
+      )
+
+    if entry["source_type"] == "external":
+      ams_id = EXTERNAL_SPOOL_AMS_ID
+      tray_id = EXTERNAL_SPOOL_ID
+    elif entry["source_type"] == "ams":
+      ams_id = entry["ams_id"]
+      tray_id = entry["slot_id"]
+    else:
+      log(f"[WARNING] Skipping filament usage for filament {filament_id} due to AMS mapping source={entry['source_type']}")
+      continue
+
+    ams_usage.append({"trayUid": trayUid(ams_id, tray_id), "id": filament_id, "usedGrams":float(filament["used_g"])})
 
   for spool in fetchSpools():
     #TODO: What if there is a mismatch between AMS and SpoolMan?
