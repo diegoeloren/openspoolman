@@ -1,15 +1,13 @@
 # <img alt="logo" src="static/logo.png" height="36" /> OpenSpoolMan 
-Use any filament like Bambu filaments while OpenSpoolMan automatically subtracts the estimated usage from the SpoolMan-managed spool records (see [AUTO SPEND](#auto-spend---automatic-filament-usage-based-on-slicer-estimate)). BambuLab filament is auto-tracked once it shows up in a tray; only third-party spools must be assigned manually through the UI.
 
-No need for cloud or additional hardware—NFC Tags are optional and you can rely solely on the web GUI. In SpoolMan you can generate QR-code stickers that link straight back to OpenSpoolMan so users can tap a label from their mobile device; change the base URL in SpoolMan settings to OpenSpoolMan before generating the sticker (see [SpoolMan stickers](#spoolman-stickers)).
+## Scope of this fork
+The scope of this fork was to get Openspoolman running reliable for my X1C in LAN-Mode and for local usage.
+I am not interested in cloud prints.
+It wasn't working properly with my setup: In terms of filament usage and print history was not properly filled:
+- I faced some issue with assigning PETG-CF and ASA-CF. (Fixed)
+- I didn't understand the mechanics of bambu_qtt.py     (Open)
+- I want to extend some api commands for pushing tags automatically via ESP32. (Open)
 
-Similar functionality to https://github.com/spuder/OpenSpool using only your phone, server, and NFC tags integrated with SpoolMan.
-
-Everything works locally without cloud access; you can use `scripts/init_bambulab.py` to fetch your `PRINTER_ID`/`PRINTER_CODE` if the printer does not expose them.
-
-Docker: https://ghcr.io/drndos/openspoolman
-
-Helm: https://github.com/drndos/openspoolman/pkgs/container/openspoolman%2Fhelm%2Fopenspoolman
 
 ### News
 - [v0.3.0](https://github.com/drndos/openspoolman/releases/tag/v0.3.0) - 23.12.2025 — more accurate filament accounting and layer tracking, higher-fidelity print history, and better Bambu Lab / AMS integration
