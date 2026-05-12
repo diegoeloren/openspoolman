@@ -24,6 +24,12 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN export FLASK_APP=src/app.py
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Debuggen
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install debugpy
+
+
+
 # define the port number the container should expose
 EXPOSE 8000
 

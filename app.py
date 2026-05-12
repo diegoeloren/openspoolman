@@ -16,6 +16,15 @@ from config import (
     PRINTER_NAME,
     CLEAR_ASSIGNMENT_WHEN_EMPTY,
 )
+
+# Debugging
+import debugpy
+
+debugpy.listen(("0.0.0.0", 5678))
+print("Waiting for debugger...")
+debugpy.wait_for_client()
+# Debuggin end
+
 from filament import generate_filament_brand_code, generate_filament_temperatures
 from frontend_utils import color_is_dark
 from messages import AMS_FILAMENT_SETTING
