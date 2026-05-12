@@ -43,6 +43,10 @@ from bambu_state import (
   is_print_final,
   normalize_prepare_percent,
 )
+from print_monitor import PrintMonitor
+PRINT_MONITOR = PrintMonitor()
+
+
 MQTT_CLIENT = {}  # Global variable storing MQTT Client
 MQTT_CLIENT_CONNECTED = False
 MQTT_KEEPALIVE = 60
@@ -453,6 +457,18 @@ def processMessage(data):
 
    # Prepare AMS spending estimation
   if "print" in data:    
+
+    ignored_commands = {
+        "extrusion_cali_get",
+        "extrusion_cali_set",
+    }
+
+    check_block = data.get("print", {})
+    ck_command = check_block.get("command")
+    if ck_command in ignored_commands:
+      return
+
+    # old stuff
     data = copy.deepcopy(data)
     update_dict(PRINTER_STATE, data)
     print_block = PRINTER_STATE.get("print", {})
@@ -803,6 +819,7 @@ def on_message(client, userdata, msg):
     #print(data)
 
     if AUTO_SPEND:
+        PRINT_MONITOR.process(PRINTER_ID, data)
         processMessage(data)
         FILAMENT_TRACKER.on_message(data)
       
@@ -817,8 +834,7 @@ def on_message(client, userdata, msg):
         log(f"AMS [{num2letter(ams['id'])}] (hum: {ams['humidity']}, temp: {ams['temp']}ºC)")
         for tray in ams["tray"]:
           if "tray_sub_brands" in tray:
-            log(
-                f"    - [{num2letter(ams['id'])}{tray['id']}] {tray['tray_sub_brands']} {tray['tray_color']} ({str(tray['remain']).zfill(3)}%) [[ {tray['tray_uuid']} ]]")
+            #log(f"    - [{num2letter(ams['id'])}{tray['id']}] {tray['tray_sub_brands']} {tray['tray_color']} ({str(tray['remain']).zfill(3)}%) [[ {tray['tray_uuid']} ]]")
 
             found = False
             tray_uuid = "00000000000000000000000000000000"
@@ -843,16 +859,17 @@ def on_message(client, userdata, msg):
               # })
 
             if not found and tray_uuid == "00000000000000000000000000000000":
+              return
               log("      - non Bambulab Spool!")
             elif not found:
-              log("      - Not found. Update spool tag!")
+              #log("      - Not found. Update spool tag!")
               tray["unmapped_bambu_tag"] = tray_uuid
               tray["issue"] = True
               clear_active_spool_for_tray(ams['id'], tray['id'])
               clear_ams_tray_assignment(ams['id'], tray['id'])
           else:
-            log(
-                f"    - [{num2letter(ams['id'])}{tray['id']}]")
+            return
+            log(f"    - [{num2letter(ams['id'])}{tray['id']}]")
             log("      - No Spool!")
 
   except Exception:

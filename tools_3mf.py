@@ -113,7 +113,7 @@ def ensure_ftps_connection(ftp_host, ftp_user, ftp_pass, connect_retries, timeou
   for attempt in range(1, connect_retries + 1):
     ftp = ImplicitFTP_TLS(context=context, timeout=timeout)
     try:
-      log(f"[DEBUG] FTP connection check ({attempt}/{connect_retries})...")
+      #log(f"[DEBUG] FTP connection check ({attempt}/{connect_retries})...")
       ftp.connect(host=ftp_host, port=990, timeout=timeout)
       ftp.login(user=ftp_user, passwd=ftp_pass)
       ftp.prot_p()
@@ -157,13 +157,14 @@ def download3mfFromFTP(filename, destFile):
 
   def attempt_single_download(path_prefix, name):
     remote_path = f"{path_prefix}{name.lstrip('/')}"
-    log(f"[DEBUG] Attempting file download: {remote_path}")
+    # log(f"[DEBUG] Attempting file download: {remote_path}")
     expected_size = None
     try:
       expected_size = int(ftp.size(remote_path))
-      log(f"[DEBUG] Remote size for {remote_path}: {expected_size} bytes")
+      #log(f"[DEBUG] Remote size for {remote_path}: {expected_size} bytes")
     except Exception as e:
-      log(f"[WARNING] Could not fetch size for {remote_path}: {e}")
+      #log(f"[WARNING] Could not fetch size for {remote_path}: {e}")
+      pass
     try:
       with open(local_path, "wb") as f:
         ftp.retrbinary(f"RETR {remote_path}", f.write)
@@ -237,9 +238,9 @@ def download3mfFromFTP(filename, destFile):
         for path_prefix in search_paths:
           try:
             tried_any = True
-            log(f"[DEBUG] Attempt {attempt}: Starting download of {candidate} via {path_prefix}...")
+            #log(f"[DEBUG] Attempt {attempt}: Starting download of {candidate} via {path_prefix}...")
             if attempt_single_download(path_prefix, candidate):
-              log("[DEBUG] File successfully downloaded!")
+              #log("[DEBUG] File successfully downloaded!")
               return True
           except ftplib.error_perm as e:
             message = str(e)
@@ -268,13 +269,14 @@ def download3mfFromFTP(filename, destFile):
 
     latest = find_latest_file(search_paths, [".3mf"])
     if latest:
-      log(f"[DEBUG] Falling back to latest .3mf: {latest}")
+      #log(f"[DEBUG] Falling back to latest .3mf: {latest}")
       expected_size = None
       try:
         expected_size = int(ftp.size(latest))
-        log(f"[DEBUG] Remote size for fallback {latest}: {expected_size} bytes")
+        #log(f"[DEBUG] Remote size for fallback {latest}: {expected_size} bytes")
       except Exception as e:
-        log(f"[WARNING] Could not fetch size for fallback {latest}: {e}")
+        #log(f"[WARNING] Could not fetch size for fallback {latest}: {e}")
+        pass
       try:
         with open(local_path, "wb") as f:
           ftp.retrbinary(f"RETR {latest}", f.write)
@@ -290,7 +292,7 @@ def download3mfFromFTP(filename, destFile):
               return False
           except Exception:
             pass
-        log("[DEBUG] File successfully downloaded via fallback.")
+        #log("[DEBUG] File successfully downloaded via fallback.")
         return True
       except Exception as e:
         try:
@@ -312,10 +314,10 @@ def download3mfFromFTP(filename, destFile):
     if list_conn:
       try:
         list_path = "/"
-        log(f"[DEBUG] Listing found printer files in {list_path} directory")
+        #log(f"[DEBUG] Listing found printer files in {list_path} directory")
         try:
           listing = list_conn.nlst(list_path)
-          log(f"[DEBUG] Directory Listing ({list_path}): {listing}")
+          #log(f"[DEBUG] Directory Listing ({list_path}): {listing}")
         except Exception:
           log(f"[ERROR] Could not retrieve directory listing for {list_path}.")
       finally:
