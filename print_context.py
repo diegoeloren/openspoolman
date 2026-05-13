@@ -43,6 +43,8 @@ JOB_TYPE_LOCAL   = "LOCAL"
 JOB_TYPE_LAN     = "LAN"
 JOB_TYPE_CLOUD   = "CLOUD"
 
+# To Do - AMS Mapping Resolver - LAN/CLOUD is command based (seed) - for LOCAL choose AMS Mapping Strategy
+# Connection to existing code
 
 @dataclass
 class PrintContext:
@@ -54,12 +56,12 @@ class PrintContext:
     source_type: str | None = None          # LOCAL, LAN, CLOUD
     job_label: str | None = None            # 
     task: str | None = None
-    job_file: str | None = None
 
     # Externally set attributes, mainly by PrintMonitor
     print_id: int | None = None
     tracking_started: bool = False
     download_done: bool = False
+    # cached model required
 
     # Contains the raw content of the latest received message
     last_raw: dict[str, Any] = field(default_factory=dict)
@@ -77,12 +79,7 @@ class PrintContext:
         # Fill all states
         self.printer_state = self._derive_printer_state()   # Update printer_state
         self._detect_source()                               # Detection logic also sets
-        
-        """
-        ToDos
-            source_type: str | None = None
-            job_file: str | None = None
-        """
+    
 
         if self.timestamp is None and self.is_ready():
             self.timestamp = time.time()
@@ -95,7 +92,6 @@ class PrintContext:
         self.source_type = None
 
         self.job_label = None
-        self.job_file = None
         self.task = None
         self.print_id = None
         self.download_done = False
@@ -109,17 +105,52 @@ class PrintContext:
             return False
         return True
 
+    def is_ready_for_download(self) -> bool:
+        """
+        Determines if the download/caching of the 3mf- print can be started.
+        """
+        if not self.is_ready():
+            return False
+        return self.is_prepared()
+
+    def is_ready_for_tracking(self) -> bool:
+        """
+        Shows if anything is prepared to attach a filament tracking
+        """
+        if not self.is_ready_for_download():
+            return False
+        return self.download_done
+
+    def is_tracking(self) -> bool:
+        """
+        Shows if a valid print_id has been assigned for tracking
+        """
+        if not self.is_ready_for_tracking():
+            return False
+        if self.print_id is None:
+            return False
+        return True
+
+    def set_tracking(self, tracking_id: int) -> None:
+        """
+        Assignes the id from the filamenttracker to the context, it is ready for tracking
+        """
+        if self.is_ready_for_tracking():
+            self.print_id = tracking_id
+
     def is_ready(self) -> bool:
         """
-        Determines if the print context has sufficient information gathered.
+        Determines if the print context has sufficient information collect sufficient information
+        about the job. Are enough information present to start download?
         """
         # Depending on the source_type several information are necessary to reach readiness
-        return ((self.source_type is not None) and          # Source is known
+        ans = ((self.source_type is not None) and          # Source is known
                 (self.printer_state == STATE_PRINTING) and  # Printer_state is PRINTING
                 (self.job_label is not None) and            # job_label is known
-                (self.job_file is not None) and             # file is known
-                (self.download_done is True)                # file is cached for layer tracking
+                (self.task is not None)                     # file is known
                 )
+    
+        return ans
     
     def _detect_source(self) -> str:
         """
@@ -152,7 +183,6 @@ class PrintContext:
             self.task = self.get_task()
             return
         
-
     def _derive_printer_state(self) -> str:
         """
         Aggregates the printers state
@@ -178,6 +208,25 @@ class PrintContext:
             return STATE_PRINTING
         # fallback
         return STATE_IDLE
+
+    def is_prepared(self) -> bool:
+        """
+        Checks the readiness of a print.
+        """
+        value = self.summary.get("gcode_file_prepare_percent")
+
+        if value is None:
+            return False
+
+        if isinstance(value, str) and not value.strip():
+            return False
+
+        try:
+            percent = float(value)
+        except (TypeError, ValueError):
+            return False
+
+        return percent >= 100
     
     def get_job_label(self) -> str | None:
         """
@@ -199,3 +248,10 @@ class PrintContext:
         if task:
             return task
         return None
+
+    def info(self) -> str:
+        """
+        Concatenates all basic attributes to one string
+        """
+        sum = f"timestamp: {self.timestamp} | printer_id: {self.printer_id} | printer_state: {self.printer_state} | source_type: {self.source_type} | job_label: {self.job_label} | task: {self.task} | print_id: {self.print_id} | tracking_started: {self.tracking_started} | download_done: {self.download_done}"
+        return sum

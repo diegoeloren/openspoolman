@@ -164,10 +164,6 @@ class PrintMonitor:
                 else:
                     return PMS_GATHERING
 
-            # if print job is finished (indepentend of success/failure/abortion)
-            if (printer_state == STATE_FINAL) or (printer_state == STATE_IDLE):
-                return PMS_DONE
-
         # ----------------------------------------------------
         # TRACKING
         # ----------------------------------------------------
@@ -217,30 +213,22 @@ class PrintMonitor:
     # --------------------------------------------------------
     # EVENT HANDLERS
     # --------------------------------------------------------
-    def on_idle(self, ctx: PrintContext):
-        log(
-            f"[EVENT] prepare started: "
-            f"{ctx.job_label}"
-        )
-
-
     def on_prepare_start(self, ctx: PrintContext):
-
         log(
-            f"[EVENT] prepare started: "
+            f"[PMS EVENT] prepare started: "
             f"{ctx.job_label}"
         )
 
     def on_print_start(self, ctx: PrintContext):
 
         log(
-            f"[EVENT] print started: "
-            f"{ctx.job_label}"
+            f"[PMS EVENT] print started: "
+            f"{ctx.info()}"
         )
 
     def on_print_done(self, ctx: PrintContext):
         log(
-            f"[EVENT] print finished: "
+            f"[PMS EVENT] print finished: "
             f"{ctx.job_label}"
         )
         ctx.reset()
