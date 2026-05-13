@@ -1,4 +1,4 @@
-from logger import append_to_rotating_file, log
+from logger import log
 import time
 from print_context import (
     PrintContext,
@@ -8,52 +8,13 @@ from print_context import (
 )
 
 # ------------------------------------------------------------
-# Raw printer state mappings from bambu_state.py
-# ------------------------------------------------------------
-
-PRINTING_GCODE_STATES = {"RUNNING", "PAUSE", "PAUSED"}
-
-FINAL_GCODE_STATES = {
-    "FINISH",
-    "FAILED",
-    "STOP",
-    "STOPPED",
-    "CANCEL",
-    "CANCELLED",
-    "CANCELED",
-    "ABORT",
-    "ABORTED",
-    "ERROR",
-    "IDLE",
-}
-
-PRINTING_STATUS_STATES = {"RUNNING", "PAUSE", "PAUSED"}
-
-FINAL_STATUS_STATES = {
-    "FINISH",
-    "FAILED",
-    "STOP",
-    "STOPPED",
-    "CANCEL",
-    "CANCELLED",
-    "CANCELED",
-    "ABORT",
-    "ABORTED",
-    "ERROR",
-    "IDLE",
-}
-
-# ------------------------------------------------------------
 # PrintMonitor States (Application States)
 # ------------------------------------------------------------
-
-PMS_UNKNOWN = "UNKNOWN"
-PMS_IDLE = "WAITING FOR JOB"
+PMS_UNKNOWN =   "UNKNOWN"
+PMS_IDLE =      "WAITING FOR JOB"
 PMS_GATHERING = "GATHERING JOB META"
-PMS_TRACKING = "TRACKING MATERIAL"
-PMS_PAUSED = "PAUSED"
-PMS_ABORTING = "ABORTING"
-PMS_DONE = "DONE"
+PMS_TRACKING =  "TRACKING MATERIAL"
+PMS_DONE =      "DONE"
 
 
 class PrintMonitor:
@@ -71,7 +32,7 @@ class PrintMonitor:
     # --------------------------------------------------------
     def process(self, printer_id: str, data: dict):
         """
-        Process incoming data messages
+        Process incoming data messages by MQTT
         """
 
         # Guard #1: Skips messages whichout "print" key word
@@ -101,7 +62,7 @@ class PrintMonitor:
         # determine next PMS state
         new_pms = self._transition_pms(
             old_pms,
-            ctx.state,
+            ctx.printer_state,
             ctx,
         )
 
@@ -120,14 +81,14 @@ class PrintMonitor:
             log(
                 f"[PMS] {printer_id}: "
                 f"{old_pms} -> {new_pms} "
-                f"(printer={ctx.state})"
+                f"(printer={ctx.printer_state})"
             )
 
         else:
             log(
                 f"[PMS] {printer_id}: "
                 f"{new_pms} "
-                f"(printer={ctx.state})"
+                f"(printer={ctx.printer_state})"
             )
 
     # --------------------------------------------------------
@@ -155,28 +116,6 @@ class PrintMonitor:
         self.state[printer_id] = state
 
     # --------------------------------------------------------
-    # SOURCE DETECTION
-    # --------------------------------------------------------
-    def _detect_source_type(self, block: dict) -> str:
-
-        print_type = (
-            block.get("print_type") or ""
-        ).lower()
-
-        # printer started directly on device
-        if print_type == "local":
-            return "LOCAL"
-
-        url = block.get("url") or ""
-
-        # LAN mode often has ftp://
-        if isinstance(url, str):
-            if url.startswith("ftp://"):
-                return "LAN"
-
-        return "CLOUD"
-
-    # --------------------------------------------------------
     # PMS TRANSITIONS
     # --------------------------------------------------------
 
@@ -190,76 +129,61 @@ class PrintMonitor:
         # ----------------------------------------------------
         # UNKNOWN
         # ----------------------------------------------------
-
         if old_pms == PMS_UNKNOWN:
 
+            # OpenSpoolMan is started and printer is in IDLE
             if printer_state == STATE_IDLE:
                 return PMS_IDLE
 
-            if printer_state == STATE_PREPARING:
-                return PMS_GATHERING
-
+            # OpenSpoolMan is started and printer is in FINAL (A job was aborted or finished)
             if printer_state == STATE_FINAL:
                 return PMS_IDLE
+            
+            # OpenSpoolMan started in the middle of a print
+            if printer_state == STATE_PRINTING:
+                # Not Handled at the moment
+                pass
 
         # ----------------------------------------------------
         # IDLE
         # ----------------------------------------------------
-
         if old_pms == PMS_IDLE:
-
-            if printer_state == STATE_PREPARING:
+            # if OpenSpoolMan is waiting for the job and is
+            # Job has been triggered (CLOUD, LAN, LOCAL)
+            if ctx.is_triggered():
                 return PMS_GATHERING
-
-            if printer_state == STATE_PRINTING:
-                return PMS_TRACKING
 
         # ----------------------------------------------------
         # GATHERING
         # ----------------------------------------------------
-
         if old_pms == PMS_GATHERING:
 
             if printer_state == STATE_PRINTING:
-                return PMS_TRACKING
+                if ctx.is_ready():
+                    return PMS_TRACKING
+                else:
+                    return PMS_GATHERING
 
-            if printer_state == STATE_FINAL:
-                return PMS_ABORTING
-
-            if printer_state == STATE_IDLE:
-                return PMS_ABORTING
+            # if print job is finished (indepentend of success/failure/abortion)
+            if (printer_state == STATE_FINAL) or (printer_state == STATE_IDLE):
+                return PMS_DONE
 
         # ----------------------------------------------------
         # TRACKING
         # ----------------------------------------------------
-
         if old_pms == PMS_TRACKING:
 
-            if printer_state == STATE_FINAL:
+            # if print job is finished (how to detect success/failure/abortion)
+            if (printer_state == STATE_FINAL) or (printer_state == STATE_IDLE):
                 return PMS_DONE
-
-            if printer_state == STATE_IDLE:
-                return PMS_ABORTING
-
-        # ----------------------------------------------------
-        # ABORTING
-        # ----------------------------------------------------
-
-        if old_pms == PMS_ABORTING:
-
-            if printer_state == STATE_IDLE:
-                return PMS_IDLE
 
         # ----------------------------------------------------
         # DONE
         # ----------------------------------------------------
-
         if old_pms == PMS_DONE:
+            return PMS_IDLE
 
-            if printer_state == STATE_IDLE:
-                return PMS_IDLE
-
-        # stay where we are
+        # If not changed, remain in 
         return old_pms
 
     # --------------------------------------------------------
@@ -277,8 +201,11 @@ class PrintMonitor:
         # ----------------------------------------------------
         # example hooks
         # ----------------------------------------------------
+        if new_pms == PMS_IDLE:
+            #self.on_idle(ctx)
+            pass
 
-        if new_pms == PMS_GATHERING:
+        elif new_pms == PMS_GATHERING:
             self.on_prepare_start(ctx)
 
         elif new_pms == PMS_TRACKING:
@@ -287,12 +214,15 @@ class PrintMonitor:
         elif new_pms == PMS_DONE:
             self.on_print_done(ctx)
 
-        elif new_pms == PMS_ABORTING:
-            self.on_print_abort(ctx)
-
     # --------------------------------------------------------
     # EVENT HANDLERS
     # --------------------------------------------------------
+    def on_idle(self, ctx: PrintContext):
+        log(
+            f"[EVENT] prepare started: "
+            f"{ctx.job_label}"
+        )
+
 
     def on_prepare_start(self, ctx: PrintContext):
 
@@ -309,15 +239,8 @@ class PrintMonitor:
         )
 
     def on_print_done(self, ctx: PrintContext):
-
         log(
             f"[EVENT] print finished: "
             f"{ctx.job_label}"
         )
-
-    def on_print_abort(self, ctx: PrintContext):
-
-        log(
-            f"[EVENT] print aborted: "
-            f"{ctx.job_label}"
-        )
+        ctx.reset()
