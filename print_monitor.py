@@ -161,8 +161,7 @@ class PrintMonitor:
             if printer_state == STATE_PRINTING:
                 if ctx.is_ready():
                     return PMS_TRACKING
-                else:
-                    return PMS_GATHERING
+
 
         # ----------------------------------------------------
         # TRACKING
