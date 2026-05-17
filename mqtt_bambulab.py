@@ -43,7 +43,10 @@ from bambu_state import (
   is_print_final,
   normalize_prepare_percent,
 )
-from print_monitor import PrintMonitor
+from print_monitor import (
+  PrintMonitor,
+  FILAMENT_TRACKER
+)
 PRINT_MONITOR = PrintMonitor()
 
 
@@ -56,7 +59,6 @@ PRINTER_STATE = {}
 PRINTER_STATE_LAST = {}
 
 PENDING_PRINT_METADATA = {}
-FILAMENT_TRACKER = FilamentUsageTracker()
 LAST_LAN_PROJECT = {}
 LOG_FILE = os.getenv("OPENSPOOLMAN_MQTT_LOG_PATH", "/home/app/logs/mqtt.log")
 _LOG_WRITE_FAILED = False
@@ -820,8 +822,8 @@ def on_message(client, userdata, msg):
 
     if AUTO_SPEND:
         PRINT_MONITOR.process(PRINTER_ID, data)
-        processMessage(data)
-        FILAMENT_TRACKER.on_message(data)
+        #processMessage(data)
+        #FILAMENT_TRACKER.on_message(data)
       
     # Save external spool tray data
     if "print" in data and "vt_tray" in data["print"]:

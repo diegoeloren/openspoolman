@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any
+from logger import log
 from copy import deepcopy
 import time
 
@@ -7,9 +8,29 @@ import time
 import json
 from pathlib import Path
 from datetime import datetime
-
 LOG_DIR = Path("/home/app/logs/")
 LOG_DIR.mkdir(exist_ok=True)
+
+from config import (
+    PRINTER_ID,
+    PRINTER_CODE,
+    PRINTER_IP,
+    AUTO_SPEND,
+    EXTERNAL_SPOOL_ID,
+    TRACK_LAYER_USAGE,
+    CLEAR_ASSIGNMENT_WHEN_EMPTY,
+)
+
+def _build_model_cache_path(printer_id: str) -> Path:
+  safe_printer_id = "".join(
+    char if char.isalnum() or char in ("-", "_") else "_"
+    for char in str(printer_id or "unknown")
+  )
+  return Path(__file__).resolve().parent / "data" / "cache" / f"{safe_printer_id}.3mf"
+
+MODEL_CACHE_PATH = _build_model_cache_path(PRINTER_ID)
+from tools_3mf import getMetaDataFrom3mf
+
 
 
 def dump_state(name, data):
@@ -92,9 +113,12 @@ class PrintContext:
 
     # Externally set attributes, mainly by PrintMonitor
     print_id: int | None = None
-    tracking_started: bool = False
     download_done: bool = False
+    tracking_started: bool = False
     # cached model required
+
+    # Contains the raw content of the latest received message
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     # Contains the raw content of the latest received message
     last_raw: dict[str, Any] = field(default_factory=dict)
@@ -113,7 +137,6 @@ class PrintContext:
         self.printer_state = self._derive_printer_state()   # Update printer_state
         self._detect_source()                               # Detection logic also sets
     
-
         if self.timestamp is None and self.is_ready():
             self.timestamp = time.time()
 
@@ -128,8 +151,10 @@ class PrintContext:
         self.task = None
         self.print_id = None
         self.download_done = False
+        self.tracking_started: False
         self.timestamp = None
 
+        self.metadata.clear()
         self.last_raw.clear()
         self.summary.clear()
 
@@ -146,19 +171,11 @@ class PrintContext:
             return False
         return self.is_prepared()
 
-    def is_ready_for_tracking(self) -> bool:
-        """
-        Shows if anything is prepared to attach a filament tracking
-        """
-        if not self.is_ready_for_download():
-            return False
-        return self.download_done
-
     def is_tracking(self) -> bool:
         """
         Shows if a valid print_id has been assigned for tracking
         """
-        if not self.is_ready_for_tracking():
+        if not self.is_downloaded():
             return False
         if self.print_id is None:
             return False
@@ -168,7 +185,8 @@ class PrintContext:
         """
         Assignes the id from the filamenttracker to the context, it is ready for tracking
         """
-        if self.is_ready_for_tracking():
+        if self.is_downloaded():
+            self.tracking_started = True
             self.print_id = tracking_id
 
     def is_ready(self) -> bool:
@@ -283,9 +301,72 @@ class PrintContext:
             return task
         return None
 
+    def get_source_type(self) -> str | None:
+        return self.source_type
+
+    def get_metadata(self) -> dict:
+        return self.metadata
+
+    def get_printid(self) -> dict:
+        return self.print_id
+
+    def get_summary(self) -> dict:
+        return self.summary
+
     def info(self) -> str:
         """
         Concatenates all basic attributes to one string
         """
         sum = f"timestamp: {self.timestamp} | printer_id: {self.printer_id} | printer_state: {self.printer_state} | source_type: {self.source_type} | job_label: {self.job_label} | task: {self.task} | print_id: {self.print_id} | tracking_started: {self.tracking_started} | download_done: {self.download_done}"
         return sum
+
+    def is_downloaded(self):
+        return self.download_done
+
+    def download(self):
+        """
+        Downloads the 3mf model and parses it.
+        Captures the meta data into the meta dict.
+        """
+        source = self.summary.get("url")
+        if not source:
+            log(f"[DEBUG] Metadata download skipped: no source (project-file).")
+            self.metadata = None
+            self.download_done = False
+            return
+        try:
+            self.metadata = getMetaDataFrom3mf(
+            source,
+            keep_downloaded_file=TRACK_LAYER_USAGE,
+            downloaded_file_path=str(MODEL_CACHE_PATH) if TRACK_LAYER_USAGE else None,
+            )
+            if self.metadata:
+                log(f"[DEBUG] Metadata downloaded for project-file from {source}")
+                pass
+            self.download_done = True
+            self.metadata["print_type"] = self.get_source_type
+            self.metadata["task_id"] = self.summary.get("task_id")
+            self.metadata["subtask_id"] = self.summary.get("subtask_id")
+            return
+        except TypeError as exc:
+            # Compatibility fallback for tests/patches that still stub an older signature.
+            if "downloaded_file_path" in str(exc):
+                self.metadata = getMetaDataFrom3mf(source, keep_downloaded_file=TRACK_LAYER_USAGE)
+            elif "keep_downloaded_file" in str(exc):
+                self.metadata = getMetaDataFrom3mf(source)
+            else:
+                raise
+            self.download_done = True
+            self.metadata["print_type"] = self.get_source_type
+            self.metadata["task_id"] = self.summary.get("task_id")
+            self.metadata["subtask_id"] = self.summary.get("subtask_id")
+            return 
+        except Exception as exc:
+            log(f"[WARNING] Metadata download failed ({reason}): {exc}")
+            self.metadata = None
+            self.download_done = False
+            return
+
+    def get_mapping(self):
+        return self.summary.get("ams_mapping") or []
+        

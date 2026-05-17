@@ -1,5 +1,6 @@
 from logger import log
 import time
+from print_history import insert_print, insert_filament_usage
 from print_context import (
     PrintContext,
     STATE_IDLE,
@@ -7,12 +8,20 @@ from print_context import (
     STATE_FINAL,
 )
 
+from config import (
+    TRACK_LAYER_USAGE,
+)
+
+from filament_usage_tracker import FilamentUsageTracker
+FILAMENT_TRACKER = FilamentUsageTracker()
+
 # ------------------------------------------------------------
 # PrintMonitor States (Application States)
 # ------------------------------------------------------------
 PMS_UNKNOWN =   "UNKNOWN"
 PMS_IDLE =      "WAITING FOR JOB"
 PMS_GATHERING = "GATHERING JOB META"
+PMS_PREPARE =   "PREPARE TRACKING"
 PMS_TRACKING =  "TRACKING MATERIAL"
 PMS_DONE =      "DONE"
 
@@ -154,14 +163,22 @@ class PrintMonitor:
                 return PMS_GATHERING
 
         # ----------------------------------------------------
-        # GATHERING
+        # GATHERING - Meta Dat From MQTT
         # ----------------------------------------------------
         if old_pms == PMS_GATHERING:
 
             if printer_state == STATE_PRINTING:
                 if ctx.is_ready():
-                    return PMS_TRACKING
+                    return PMS_PREPARE
 
+        # ----------------------------------------------------
+        # PREPARATION - Init Downloads, Parsing Files, Request Print ID
+        # ----------------------------------------------------
+        if old_pms == PMS_PREPARE:
+
+            if ctx.is_ready_for_download():
+            #if ctx.is_tracking():
+                return PMS_TRACKING
 
         # ----------------------------------------------------
         # TRACKING
@@ -201,6 +218,9 @@ class PrintMonitor:
             pass
 
         elif new_pms == PMS_GATHERING:
+            self.on_gathering_start(ctx)
+        
+        elif new_pms == PMS_PREPARE:
             self.on_prepare_start(ctx)
 
         elif new_pms == PMS_TRACKING:
@@ -212,22 +232,84 @@ class PrintMonitor:
     # --------------------------------------------------------
     # EVENT HANDLERS
     # --------------------------------------------------------
+    # Prepartion from printer side (automatically accumulated via MQTT)
+    def on_gathering_start(self, ctx: PrintContext):
+        log(
+            f"[PMS EVENT] gathering started: "
+            f"{ctx.job_label}"
+        )
+
+    # Prepartions needed from OpenSpoolMan Side
     def on_prepare_start(self, ctx: PrintContext):
         log(
             f"[PMS EVENT] prepare started: "
             f"{ctx.job_label}"
         )
 
-    def on_print_start(self, ctx: PrintContext):
+        if not ctx.is_downloaded():
+            ctx.download()      # Download and Parse 3mf-file
+            if not ctx.is_tracking():
+                new_print_id = insert_print(
+                    ctx.get_task(),
+                    ctx.get_source_type(),
+                    ctx.get_metadata().get("image"),
+                )
 
+                # Insert filaments used.
+                self.apply_filaments(ctx,new_print_id)
+
+                # AMS Mapping
+                act_mapping = ctx.get_mapping() # Incomplete for local jobs / external spool holder
+                FILAMENT_TRACKER.apply_ams_mapping(act_mapping)
+
+                # Handover meta
+                meta = ctx.get_metadata()
+                FILAMENT_TRACKER.set_print_metadata(meta)
+
+                # Set the Tracking
+                ctx.set_tracking(new_print_id)
+        
+    # While Printing
+    def on_print_start(self, ctx: PrintContext):
         log(
-            f"[PMS EVENT] print started: "
+            f"[PMS EVENT] running: "
             f"{ctx.info()}"
         )
+        data = ctx.last_raw
+        FILAMENT_TRACKER.on_message(data)
 
+    # Printing finished
     def on_print_done(self, ctx: PrintContext):
         log(
             f"[PMS EVENT] print finished: "
             f"{ctx.job_label}"
         )
         ctx.reset()
+
+    def apply_filaments(self,ctx,print_id):
+        filaments = ctx.get_metadata().get("filaments",{}).items()
+        for id, filament in filaments:
+            parsed_grams = self._parse_floats(filament.get("used_g"))
+            parsed_length_m = self._parse_floats(filament.get("used_m"))
+            estimated_length_mm = parsed_length_m * 1000 if parsed_length_m is not None else None
+            grams_used = parsed_grams if parsed_grams is not None else 0.0
+            length_used = estimated_length_mm if estimated_length_mm is not None else 0.0
+            if TRACK_LAYER_USAGE:
+                grams_used = 0.0
+                length_used = 0.0
+            insert_filament_usage(
+                print_id,
+                filament["type"],
+                filament["color"],
+                grams_used,
+                id,
+                estimated_grams=parsed_grams,
+                length_used=length_used,
+                estimated_length=estimated_length_mm,
+            )
+
+    def _parse_floats(self,value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
