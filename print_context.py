@@ -224,10 +224,12 @@ class PrintContext:
             if target.startswith(("http://", "https://")):
                 source = JOB_TYPE_CLOUD
 
+            # Maybe X1C specific
             elif target.startswith("file:///sdcard"):
                 source = JOB_TYPE_LOCAL
 
-            elif target.startswith("file://"):
+            # Orca used file:// and bambu (2.7beta) used ftp
+            elif target.startswith("file://") or target.startswith("ftp://"):
                 source = JOB_TYPE_LAN
 
         if source is not None:
@@ -305,6 +307,15 @@ class PrintContext:
         return self.source_type
 
     def get_metadata(self) -> dict:
+        """
+        Returns the metadata which are required for the filamenttracker.
+        It is set manually.
+        """
+        self.metadata["print_id"] = self.get_printid()
+        self.metadata["use_ams"] = self.get_ams_usage()
+        self.metadata["print_type"] = self.get_source_type
+        self.metadata["task_id"] = self.summary.get("task_id")
+        self.metadata["subtask_id"] = self.summary.get("subtask_id")
         return self.metadata
 
     def get_printid(self) -> dict:
@@ -312,6 +323,9 @@ class PrintContext:
 
     def get_summary(self) -> dict:
         return self.summary
+
+    def get_ams_usage(self) -> bool:
+        return bool(self.summary.get("use_ams",False))
 
     def info(self) -> str:
         """
@@ -344,9 +358,6 @@ class PrintContext:
                 log(f"[DEBUG] Metadata downloaded for project-file from {source}")
                 pass
             self.download_done = True
-            self.metadata["print_type"] = self.get_source_type
-            self.metadata["task_id"] = self.summary.get("task_id")
-            self.metadata["subtask_id"] = self.summary.get("subtask_id")
             return
         except TypeError as exc:
             # Compatibility fallback for tests/patches that still stub an older signature.
@@ -357,9 +368,6 @@ class PrintContext:
             else:
                 raise
             self.download_done = True
-            self.metadata["print_type"] = self.get_source_type
-            self.metadata["task_id"] = self.summary.get("task_id")
-            self.metadata["subtask_id"] = self.summary.get("subtask_id")
             return 
         except Exception as exc:
             log(f"[WARNING] Metadata download failed ({reason}): {exc}")

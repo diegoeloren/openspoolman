@@ -100,6 +100,9 @@ class PrintMonitor:
                 f"(printer={ctx.printer_state})"
             )
 
+        # runtime tracking
+        FILAMENT_TRACKER.on_message({"print":ctx.last_raw})
+
     # --------------------------------------------------------
     # Catch Context; Generate one if not present 
     # --------------------------------------------------------
@@ -224,7 +227,7 @@ class PrintMonitor:
             self.on_prepare_start(ctx)
 
         elif new_pms == PMS_TRACKING:
-            self.on_print_start(ctx)
+            self.on_print_started(ctx)
 
         elif new_pms == PMS_DONE:
             self.on_print_done(ctx)
@@ -249,10 +252,11 @@ class PrintMonitor:
         if not ctx.is_downloaded():
             ctx.download()      # Download and Parse 3mf-file
             if not ctx.is_tracking():
+                image = ctx.get_metadata().get("image")
                 new_print_id = insert_print(
                     ctx.get_task(),
                     ctx.get_source_type(),
-                    ctx.get_metadata().get("image"),
+                    image,
                 )
 
                 # Insert filaments used.
@@ -264,19 +268,18 @@ class PrintMonitor:
 
                 # Handover meta
                 meta = ctx.get_metadata()
+                #print(meta)
                 FILAMENT_TRACKER.set_print_metadata(meta)
 
                 # Set the Tracking
                 ctx.set_tracking(new_print_id)
         
     # While Printing
-    def on_print_start(self, ctx: PrintContext):
+    def on_print_started(self, ctx: PrintContext):
         log(
-            f"[PMS EVENT] running: "
+            f"[PMS EVENT] print started: "
             f"{ctx.info()}"
         )
-        data = ctx.last_raw
-        FILAMENT_TRACKER.on_message(data)
 
     # Printing finished
     def on_print_done(self, ctx: PrintContext):
