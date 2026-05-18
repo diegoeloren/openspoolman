@@ -15,7 +15,6 @@ from tools_3mf import download3mfFromCloud, download3mfFromFTP, download3mfFromL
 from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking
 from logger import log
 from bambu_state import (
-  PRINT_RUN_REGISTRY,
   extract_gcode_state,
   extract_prepare_percent,
   extract_print_status,
@@ -301,8 +300,7 @@ class FilamentUsageTracker:
           self.current_layer = layer
 
     if is_print_active(gcode_state, print_status):
-      active_run = PRINT_RUN_REGISTRY.get_active_run(PRINTER_ID)
-      if active_run and self.active_model is None and self._pending_project_file:
+      if self.active_model is None and self._pending_project_file:
         self._handle_print_start(self._pending_project_file)
         self._pending_project_file = None
 

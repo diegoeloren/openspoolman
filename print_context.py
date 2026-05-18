@@ -325,7 +325,15 @@ class PrintContext:
         return self.summary
 
     def get_ams_usage(self) -> bool:
-        return bool(self.summary.get("use_ams",False))
+        use_ams_raw = self.summary.get("use_ams",False)
+        use_ams = None
+        if use_ams_raw is None:
+            use_ams = history_print_type == "local"
+        elif isinstance(use_ams_raw, str):
+            use_ams = use_ams_raw.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            use_ams = bool(use_ams_raw)
+        return use_ams
 
     def info(self) -> str:
         """
