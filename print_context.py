@@ -2,12 +2,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from logger import log
 from copy import deepcopy
-import time
+from aux_fx import now
+
 
 # Debugging only #
 import json
 from pathlib import Path
-from datetime import datetime
+
 LOG_DIR = Path("/home/app/logs/")
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -34,7 +35,7 @@ from tools_3mf import getMetaDataFrom3mf
 
 
 def dump_state(name, data):
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = now().strftime("%Y%m%d_%H%M%S")
 
     base_path = LOG_DIR / f"{name}_{ts}"
     path = base_path.with_suffix(".json")
@@ -138,7 +139,7 @@ class PrintContext:
         self._detect_source()                               # Detection logic also sets
     
         if self.timestamp is None and self.is_ready():
-            self.timestamp = time.time()
+            self.timestamp = now()
 
     def reset(self) -> None:
         """
@@ -195,11 +196,27 @@ class PrintContext:
         about the job. Are enough information present to start download?
         """
         # Depending on the source_type several information are necessary to reach readiness
-        ans = ((self.source_type is not None) and          # Source is known
-                (self.printer_state == STATE_PRINTING) and  # Printer_state is PRINTING
+
+        source_type = self.source_type
+        if source_type is None:
+            return False
+
+        ans = False
+        if source_type in (JOB_TYPE_LAN, JOB_TYPE_CLOUD):
+            ans = ((self.printer_state == STATE_PRINTING) and  # Printer_state is PRINTING
                 (self.job_label is not None) and            # job_label is known
                 (self.task is not None)                     # file is known
                 )
+
+        # handle LAN based
+        if source_type in (JOB_TYPE_LOCAL):
+            task = self.get_task()
+            if task is not None:
+                self.task = task
+                ans = ((self.printer_state == STATE_PRINTING) and
+                    (self.job_label is not None))          # job_label is known
+
+        log(f"[DEBUG] Readiness: Source: {self.source_type} JobLabel={self.job_label} task={self.task}")
     
         return ans
     
@@ -225,7 +242,7 @@ class PrintContext:
                 source = JOB_TYPE_CLOUD
 
             # Maybe X1C specific
-            elif target.startswith("file:///sdcard"):
+            elif target.startswith("file:///sdcard") or target.startswith("file:///userdata"):
                 source = JOB_TYPE_LOCAL
 
             # Orca used file:// and bambu (2.7beta) used ftp

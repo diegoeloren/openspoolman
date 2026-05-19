@@ -1,7 +1,7 @@
 import os
 import shutil
 import sqlite3
-from datetime import datetime
+from aux_fx import now
 from pathlib import Path
 
 from logger import log
@@ -122,7 +122,7 @@ def _versioned_target_path(source: Path) -> Path:
         stem = f"{stem}{PRIMARY_VERSION_SUFFIX}"
     candidate = source.with_name(f"{stem}{suffix}")
     if candidate.exists():
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        timestamp = now().strftime("%Y%m%d%H%M%S")
         candidate = source.with_name(f"{stem}.{timestamp}{suffix}")
     return candidate
 
@@ -234,7 +234,7 @@ def insert_print(file_name: str, print_type: str, image_file: str = None, print_
     If no print_date is provided, the current timestamp is used.
     """
     if print_date is None:
-        print_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print_date = now().strftime("%Y-%m-%d %H:%M:%S")
 
     conn = sqlite3.connect(db_config["db_path"])
     cursor = conn.cursor()

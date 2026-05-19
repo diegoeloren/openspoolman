@@ -2,7 +2,7 @@ import os
 import time
 import re
 import builtins
-from datetime import datetime
+from aux_fx import now
 
 def append_to_rotating_file(file_path: str, text: str, max_size: int = 1_048_576, max_files: int = 5) -> None:
     """
@@ -14,7 +14,7 @@ def append_to_rotating_file(file_path: str, text: str, max_size: int = 1_048_576
     base_filename = os.path.splitext(base_filename)[0]
     os.makedirs(directory, exist_ok=True)
     
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"{timestamp} :: {text}\n"
     
     # Rotate the file if it exceeds the size limit
@@ -42,7 +42,7 @@ def log_with_timestamp(*args, sep=" ", end="\n", file=None, flush=True) -> None:
     """
     Print a message with a leading timestamp, preserving the standard print API.
     """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = now().strftime("%Y-%m-%d %H:%M:%S")
     builtins.print(f"[{timestamp}]", *args, sep=sep, end=end, file=file, flush=flush)
 
 

@@ -3,6 +3,7 @@ from functools import partial
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
 # Load environment variables from config.env when present so live runs have access
 # to printer and Spoolman credentials without manual exports.
@@ -45,3 +46,6 @@ SPOOL_SORTING = os.getenv(
 DISABLE_MISMATCH_WARNING = _env_to_bool("DISABLE_MISMATCH_WARNING", False)
 CLEAR_ASSIGNMENT_WHEN_EMPTY = _env_to_bool("CLEAR_ASSIGNMENT_WHEN_EMPTY", False)
 COLOR_DISTANCE_TOLERANCE = _env_to_int("COLOR_DISTANCE_TOLERANCE", 40)
+
+TIMEZONE = os.getenv("TIMEZONE", "UTC")
+TZINFO = ZoneInfo(TIMEZONE)

@@ -7,6 +7,7 @@ from config import (
     DISABLE_MISMATCH_WARNING,
     COLOR_DISTANCE_TOLERANCE,
 )
+from aux_fx import now
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path

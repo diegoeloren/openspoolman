@@ -1,5 +1,4 @@
 from logger import log
-import time
 from print_history import insert_print, insert_filament_usage
 from print_context import (
     PrintContext,
@@ -170,9 +169,8 @@ class PrintMonitor:
         # ----------------------------------------------------
         if old_pms == PMS_GATHERING:
 
-            if printer_state == STATE_PRINTING:
-                if ctx.is_ready():
-                    return PMS_PREPARE
+            if ctx.is_ready():
+                return PMS_PREPARE
 
         # ----------------------------------------------------
         # PREPARATION - Init Downloads, Parsing Files, Request Print ID

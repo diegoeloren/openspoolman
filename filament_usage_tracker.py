@@ -4,7 +4,9 @@ import os
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import datetime, timedelta
+from datetime import timedelta
+from aux_fx import now
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -382,7 +384,7 @@ class FilamentUsageTracker:
     if self.active_model:
       self._layer_tracking_total_layers = self._infer_total_layers()
       self._accumulate_total_usage_mm()
-      self._layer_tracking_start_time = datetime.now()
+      self._layer_tracking_start_time = now()
       self._bind_initial_spools()
       self._maybe_update_predicted_total()
       if self.print_id:
@@ -509,7 +511,7 @@ class FilamentUsageTracker:
     if self.print_id:
       self._set_layer_tracking_status(
           LAYER_TRACKING_STATUS_COMPLETED,
-          extra_fields={"actual_end_time": self._format_timestamp(datetime.now())},
+          extra_fields={"actual_end_time": self._format_timestamp(now())},
       )
 
     self.active_model = None
@@ -534,7 +536,7 @@ class FilamentUsageTracker:
     if self.print_id:
       self._set_layer_tracking_status(
           status,
-          extra_fields={"actual_end_time": self._format_timestamp(datetime.now())},
+          extra_fields={"actual_end_time": self._format_timestamp(now())},
       )
 
     self.active_model = None
@@ -694,15 +696,15 @@ class FilamentUsageTracker:
     ):
       return None
 
-    now = datetime.now()
-    elapsed_seconds = (now - self._layer_tracking_start_time).total_seconds()
+    actual = now()
+    elapsed_seconds = (actual - self._layer_tracking_start_time).total_seconds()
     if layers_printed == 0:
       return None
 
     rate_per_layer = elapsed_seconds / layers_printed
     remaining_layers = total_layers - layers_printed
     remaining_seconds = max(rate_per_layer * remaining_layers, 0)
-    predicted = now + timedelta(seconds=remaining_seconds)
+    predicted = actual + timedelta(seconds=remaining_seconds)
     return self._format_timestamp(predicted)
 
   def _get_spool_id_for_filament(self, filament_index: int) -> int | None:
@@ -785,7 +787,7 @@ class FilamentUsageTracker:
     predicted_end = None
     if self._mc_remaining_time_minutes is not None and self._mc_remaining_time_minutes > 0:
       predicted_end = self._format_timestamp(
-          datetime.now() + timedelta(minutes=self._mc_remaining_time_minutes)
+          now() + timedelta(minutes=self._mc_remaining_time_minutes)
       )
     else:
       predicted_end = self._compute_predicted_end_time(layers_printed, self._layer_tracking_total_layers)

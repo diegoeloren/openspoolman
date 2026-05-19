@@ -10,6 +10,7 @@ import re
 import shutil
 import time
 from datetime import datetime
+from aux_fx import now
 from config import PRINTER_CODE, PRINTER_IP
 from urllib.parse import urlparse
 from logger import log
@@ -204,7 +205,7 @@ def download3mfFromFTP(filename, destFile):
           if m:
             ts_str, fname = m.groups()
             try:
-              ts = datetime.strptime(ts_str, "%b %d %H:%M").replace(year=datetime.now().year)
+              ts = datetime.strptime(ts_str, "%b %d %H:%M").replace(year=now().year)
             except Exception:
               ts = None
           else:
