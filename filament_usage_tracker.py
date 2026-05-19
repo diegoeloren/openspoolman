@@ -259,186 +259,255 @@ class FilamentUsageTracker:
     self.print_metadata = metadata
     self.print_id = incoming_id
 
-  def on_message(self, message: dict) -> None:
-    if "print" not in message:
-      return
+    # ==========================================================
+    # PRINT LIFECYCLE
+    # ==========================================================
 
-    print_obj = message.get("print", {})
-    command = print_obj.get("command")
-    gcode_state = extract_gcode_state(message)
-    print_status = extract_print_status(message)
-    raw_prepare = extract_prepare_percent(message)
-    if "gcode_file_prepare_percent" in print_obj:
-      normalized_prepare = normalize_prepare_percent(raw_prepare)
-      self._prepare_percent_normalized = normalized_prepare
-      current_prepare = (raw_prepare, normalized_prepare)
-      if current_prepare != self._last_prepare_logged:
-        log(f"[filament-tracker] prepare_percent raw={raw_prepare!r} normalized={normalized_prepare}")
-        self._last_prepare_logged = current_prepare
-    if print_obj.get('gcode_state') is not None:
-      log(f"[filament-tracker] on_message command={command} gcode_state={print_obj.get('gcode_state')}")
-
-    previous_state = self.gcode_state
-    self.gcode_state = print_obj.get("gcode_state", self.gcode_state)
-    if "mc_remaining_time" in print_obj:
-      try:
-        self._mc_remaining_time_minutes = float(print_obj["mc_remaining_time"])
-      except (TypeError, ValueError):
-        self._mc_remaining_time_minutes = None
-
-    if command == "project_file":
-      if TRACK_LAYER_USAGE and self.active_model is None:
-        self._handle_print_start(print_obj)
-        self._pending_project_file = None
-      else:
-        self._pending_project_file = print_obj
-
-    if command == "push_status":
-      if "layer_num" in print_obj:
-        last_layer = self.current_layer
-        layer = print_obj["layer_num"]
-        if layer != last_layer:
-          self._handle_layer_change(layer)
-          self.current_layer = layer
-
-    if is_print_active(gcode_state, print_status):
-      if self.active_model is None and self._pending_project_file:
-        self._handle_print_start(self._pending_project_file)
-        self._pending_project_file = None
-
-    if is_print_final(gcode_state, print_status) and self.active_model is not None:
-      if self.gcode_state == "FINISH":
-        self._handle_print_end()
-      else:
-        status = (
-            LAYER_TRACKING_STATUS_FAILED
-            if self.gcode_state == "FAILED"
-            else LAYER_TRACKING_STATUS_ABORTED
-        )
-        self._handle_print_abort(status=status)
-
-    if self.gcode_state == "RUNNING" and previous_state != "RUNNING" and self.active_model is None:
-      task_id = print_obj.get("task_id")
-      subtask_id = print_obj.get("subtask_id")
-      self._attempt_print_resume(task_id, subtask_id)
-
-  def _handle_print_start(self, print_obj: dict) -> None:
-    log("[filament-tracker] Print start")
-
-    cached_model_path = None
-    if isinstance(self.print_metadata, dict):
-      cached_model_path = self.print_metadata.get("downloaded_model_path")
-
-    if cached_model_path and os.path.exists(cached_model_path):
-      log(f"[filament-tracker] Reusing cached model file: {cached_model_path}")
-      model_path = cached_model_path
-    else:
-      model_url = print_obj.get("url")
-      model_path = self._retrieve_model(model_url)
-
-    if model_path is None:
-      log("Failed to retrieve model. Print will not be tracked.")
-      return
-
-    if isinstance(self.print_metadata, dict) and self.print_metadata.get("downloaded_model_path") == model_path:
-      self.print_metadata.pop("downloaded_model_path", None)
-
-    use_ams = bool(print_obj.get("use_ams", False))
-    ams_mapping = print_obj.get("ams_mapping", []) if use_ams else None
-    gcode_file_name = print_obj.get("param")
-    self._start_layer_tracking_for_model(
-      model_path=model_path,
-      gcode_file_name=gcode_file_name,
-      use_ams=use_ams,
-      ams_mapping=ams_mapping,
-      task_id=print_obj.get("task_id"),
-      subtask_id=print_obj.get("subtask_id"),
-    )
-
-  def _start_layer_tracking_for_model(
+  def start_print(
       self,
+      *,
+      print_metadata: dict,
       model_path: str,
       gcode_file_name: str | None,
       use_ams: bool,
       ams_mapping: list[int] | None,
       task_id,
       subtask_id,
-  ) -> None:
-    self._reset_layer_tracking_state()
-    clear_checkpoint()
-    self.spent_layers = set()
-    self.cumulative_grams_used = {}
-    self.cumulative_length_used = {}
+  ) -> bool:
+      """
+      Start a new tracked print.
 
-    if use_ams:
-      self.ams_mapping = ams_mapping or []
-      self.using_ams = True
-      log(f"[filament-tracker] Using AMS mapping: {self.ams_mapping}")
-    else:
-      self.using_ams = False
-      self.ams_mapping = None
-      log("[filament-tracker] Not using AMS, defaulting to external spool")
+      Called exactly once by PrintMonitor during PMS_PREPARE.
+      """
 
-    self._load_model(model_path, gcode_file_name)
+      log("[filament-tracker] start_print()")
 
-    if self.active_model:
-      self._layer_tracking_total_layers = self._infer_total_layers()
+      self.set_print_metadata(print_metadata)
+
+      self._reset_layer_tracking_state()
+      clear_checkpoint()
+
+      self.spent_layers = set()
+      self.current_layer = None
+
+      self.cumulative_grams_used = {}
+      self.cumulative_length_used = {}
+
+      # ------------------------------------------------------
+      # AMS
+      # ------------------------------------------------------
+
+      if use_ams:
+          self.ams_mapping = ams_mapping or []
+          self.using_ams = True
+
+          log(
+              f"[filament-tracker] "
+              f"Using AMS mapping: {self.ams_mapping}"
+          )
+
+      else:
+          self.using_ams = False
+          self.ams_mapping = None
+
+          log(
+              "[filament-tracker] "
+              "Not using AMS, defaulting to external spool"
+          )
+
+      # ------------------------------------------------------
+      # LOAD MODEL
+      # ------------------------------------------------------
+
+      self._load_model(model_path, gcode_file_name)
+
+      if not self.active_model:
+          log("[filament-tracker] Failed to load model")
+          return False
+
+      # ------------------------------------------------------
+      # PRECOMPUTE
+      # ------------------------------------------------------
+      self._layer_tracking_total_layers = (
+          self._infer_total_layers()
+      )
       self._accumulate_total_usage_mm()
       self._layer_tracking_start_time = now()
+
+      # ------------------------------------------------------
+      # INITIAL SPOOL BINDING
+      # ------------------------------------------------------
       self._bind_initial_spools()
       self._maybe_update_predicted_total()
+
+      # ------------------------------------------------------
+      # DB INIT
+      # ------------------------------------------------------
+
       if self.print_id:
-        initial_fields = {"status": LAYER_TRACKING_STATUS_RUNNING}
-        if self._layer_tracking_total_layers is not None:
-          initial_fields["total_layers"] = self._layer_tracking_total_layers
-        update_layer_tracking(self.print_id, **initial_fields)
-        self._layer_tracking_status = LAYER_TRACKING_STATUS_RUNNING
-        self._update_layer_tracking_progress()
+          payload = {
+              "status": LAYER_TRACKING_STATUS_RUNNING,
+          }
 
-    save_checkpoint(
-      model_path=model_path,
-      current_layer=0,
-      task_id=task_id,
-      subtask_id=subtask_id,
-      ams_mapping=self.ams_mapping,
-      gcode_file_name=gcode_file_name,
-    )
+          if self._layer_tracking_total_layers is not None:
+              payload["total_layers"] = (
+                  self._layer_tracking_total_layers
+              )
 
-    try:
-      os.remove(model_path)
-    except OSError:
-      pass
+          update_layer_tracking(
+              self.print_id,
+              **payload,
+          )
 
-    self._handle_layer_change(0)
+          self._layer_tracking_status = (
+              LAYER_TRACKING_STATUS_RUNNING
+          )
 
-  def start_local_print_from_metadata(self, metadata: dict | None) -> None:
-    if not metadata:
-      return
-    model_path = metadata.get("model_path", "").replace("local:", "")
-    model_url = metadata.get("model_url")
+          self._update_layer_tracking_progress()
 
-    if model_path and not model_url:
-      model_url = model_path
+      # ------------------------------------------------------
+      # CHECKPOINT
+      # ------------------------------------------------------
 
-    if not model_path and not model_url:
-      log("[filament-tracker] Metadata missing model_path or URL, cannot start local tracking")
-      return
+      save_checkpoint(
+          model_path=model_path,
+          current_layer=0,
+          task_id=task_id,
+          subtask_id=subtask_id,
+          ams_mapping=self.ams_mapping,
+          gcode_file_name=gcode_file_name,
+      )
 
-    log("[filament-tracker] Starting local print from cached metadata")
-    self.set_print_metadata(metadata)
+      log("[filament-tracker] Print initialized")
 
-    ams_mapping = metadata.get("ams_mapping") or []
-    fake_print = {
-      "param": metadata.get("gcode_path"),
-      "use_ams": bool(ams_mapping),
-      "ams_mapping": ams_mapping,
-      "task_id": metadata.get("task_id"),
-      "subtask_id": metadata.get("subtask_id"),
-    }
-    
-    fake_print["url"] = model_url
+      return True
 
-    self._handle_print_start(fake_print)
+  # ==========================================================
+  # LAYER EVENT
+  # ==========================================================
+
+  def handle_layer_change(self, layer: int) -> None:
+      """
+      Called by PrintMonitor whenever the printer changes layer.
+      """
+
+      if self.active_model is None:
+          return
+
+      if layer == self.current_layer:
+          return
+
+      log(
+          f"[filament-tracker] "
+          f"Layer change: {self.current_layer} -> {layer}"
+      )
+
+      self._handle_layer_change(layer)
+
+      self.current_layer = layer
+
+  def handle_runtime_message(self, print_obj: dict) -> None:
+      """
+      Handle runtime MQTT updates while tracking is active.
+
+      This method intentionally owns:
+      - gcode_state transitions
+      - remaining time updates
+      - finish/abort detection
+      - checkpoint recovery triggers
+
+      PrintMonitor should NOT interpret printer final states.
+      """
+
+      # ------------------------------------------------------
+      # GCODE STATE
+      # ------------------------------------------------------
+
+      previous_state = self.gcode_state
+
+      self.gcode_state = print_obj.get(
+          "gcode_state",
+          self.gcode_state,
+      )
+
+      # ------------------------------------------------------
+      # REMAINING TIME
+      # ------------------------------------------------------
+
+      if "mc_remaining_time" in print_obj:
+          try:
+              self._mc_remaining_time_minutes = float(
+                  print_obj["mc_remaining_time"]
+              )
+          except (TypeError, ValueError):
+              self._mc_remaining_time_minutes = None
+
+      # ------------------------------------------------------
+      # FINAL STATE DETECTION
+      # ------------------------------------------------------
+
+      gcode_state = extract_gcode_state(
+          {"print": print_obj}
+      )
+
+      print_status = extract_print_status(
+          {"print": print_obj}
+      )
+
+      if (
+          is_print_final(gcode_state, print_status)
+          and self.active_model is not None
+      ):
+
+          if self.gcode_state == "FINISH":
+
+              log(
+                  "[filament-tracker] "
+                  "Detected successful print completion"
+              )
+
+              self._handle_print_end()
+
+          else:
+
+              status = (
+                  LAYER_TRACKING_STATUS_FAILED
+                  if self.gcode_state == "FAILED"
+                  else LAYER_TRACKING_STATUS_ABORTED
+              )
+
+              log(
+                  f"[filament-tracker] "
+                  f"Detected aborted print ({status})"
+              )
+
+              self._handle_print_abort(
+                  status=status
+              )
+
+      # ------------------------------------------------------
+      # RECOVERY
+      # ------------------------------------------------------
+
+      if (
+          self.gcode_state == "RUNNING"
+          and previous_state != "RUNNING"
+          and self.active_model is None
+      ):
+
+          task_id = print_obj.get("task_id")
+          subtask_id = print_obj.get("subtask_id")
+
+          log(
+              "[filament-tracker] "
+              "RUNNING detected without active model, "
+              "attempting checkpoint recovery"
+          )
+
+          self._attempt_print_resume(
+              task_id,
+              subtask_id,
+          )
 
   def apply_ams_mapping(self, ams_mapping: list[int] | None) -> None:
     if not ams_mapping:
@@ -479,23 +548,28 @@ class FilamentUsageTracker:
       log(f"Failed to fetch model: {exc}")
       return None
 
-  def _handle_layer_change(self, layer: int) -> None:
+  def _handle_layer_change(self, new_layer: int) -> None:
     if self.active_model is None:
-      return
-    if layer in self.spent_layers:
-      return
+        return
 
-    log(f"[filament-tracker] Handle layer change -> {layer}")
-    self.spent_layers.add(layer)
-    last_layer = self.current_layer
+    # First event: nur initialisieren, NICHT buchen
+    if self.current_layer is None:
+        self.current_layer = new_layer
+        return
 
-    if last_layer is not None:
-      for i in range(last_layer + 1, layer + 1):
-        self._spend_filament_for_layer(i)
-    else:
-      self._spend_filament_for_layer(layer)
+    old_layer = self.current_layer
 
-    update_checkpoint_layer(layer)
+    if new_layer == old_layer:
+        return
+
+    # 👉 WICHTIG: nur old_layer verbuchen
+    log(f"[filament-tracker] commit layer {old_layer}")
+    self._spend_filament_for_layer(old_layer)
+    self.spent_layers.add(old_layer)
+
+    self.current_layer = new_layer
+    update_checkpoint_layer(new_layer)
+    
 
   def _handle_print_end(self) -> None:
     if self.active_model is None:

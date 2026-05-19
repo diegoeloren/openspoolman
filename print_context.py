@@ -320,6 +320,24 @@ class PrintContext:
             return task
         return None
 
+    def get_task_id(self) -> int:
+        """
+        Extracts the task id
+        """
+        task = self.summary.get("task_id")
+        if task:
+            return task
+        return 0
+
+    def get_subtask_id(self) -> int:
+        """
+        Extracts the subtask id
+        """
+        task = self.summary.get("subtask_id")
+        if task:
+            return task
+        return 0
+
     def get_source_type(self) -> str | None:
         return self.source_type
 
