@@ -631,7 +631,9 @@ class FilamentUsageTracker:
     consumeSpool(spool_id, use_length=usage_rounded)
 
     if self.print_id and filament_id is not None:
+      log(f"[filament-tracker] Updates filament_usage for used spool: Print-id={self.print_id}, filament={filament_id}, spool_id={spool_id}")
       update_filament_spool(self.print_id, filament_id, spool_id)
+      log(f"[filament-tracker] Updates filament_usage for: Print-id={self.print_id}, filament={filament_id}, spool_id={spool_id}")
       update_filament_grams_used(self.print_id, filament_id, grams_rounded, length_used=cumulative_length)
     elif self.print_id and filament_id is None:
       log(f"[filament-tracker] Skipping print history update for tool {filament}: missing filament_id mapping")

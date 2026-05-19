@@ -267,12 +267,9 @@ class PrintMonitor:
                 FILAMENT_TRACKER.apply_ams_mapping(act_mapping)
 
                 # Handover meta
-                meta = ctx.get_metadata()
-                #print(meta)
-                FILAMENT_TRACKER.set_print_metadata(meta)
-
-                # Set the Tracking
                 ctx.set_tracking(new_print_id)
+                meta = ctx.get_metadata()
+                FILAMENT_TRACKER.set_print_metadata(meta)
         
     # While Printing
     def on_print_started(self, ctx: PrintContext):
@@ -310,6 +307,7 @@ class PrintMonitor:
                 length_used=length_used,
                 estimated_length=estimated_length_mm,
             )
+            print(f"[Print-Context]: filament with id={id} and print-id{print_id} inserted into database.")
 
     def _parse_floats(self,value):
         try:

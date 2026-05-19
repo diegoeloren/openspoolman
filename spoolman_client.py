@@ -71,7 +71,7 @@ def consumeSpool(spool_id, use_weight=None, use_length=None):
   if use_length is not None:
     payload["use_length"] = use_length
 
-  log(f'Consuming {payload} from spool {spool_id}')
+  #log(f'Consuming {payload} from spool {spool_id}')
 
   response = requests.put(f"{SPOOLMAN_API_URL}/spool/{spool_id}/use", json=payload)
   _log_spoolman_change(
