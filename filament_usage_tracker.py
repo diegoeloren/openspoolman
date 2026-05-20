@@ -746,7 +746,8 @@ class FilamentUsageTracker:
     if not self.active_model:
       return None
     try:
-      return max(self.active_model.keys()) + 1
+      #return max(self.active_model.keys()) + 1
+      return max(self.active_model.keys())
     except Exception:
       return None
 
@@ -959,29 +960,124 @@ class FilamentUsageTracker:
       return
     self.active_model = evaluate_gcode(gcode)
 
-  def _attempt_print_resume(self, task_id, subtask_id) -> None:
+  def _attempt_print_resume(self, task_id, subtask_id) -> bool:
+
     result = recover_model(task_id, subtask_id)
+
     if result is None:
-      log("[filament-tracker] No checkpoint to recover")
-      return
-    log(f"[filament-tracker] Recovering from checkpoint task={task_id} subtask={subtask_id}")
-    model_path, gcode_file_name, current_layer, ams_mapping = result
+        log("[filament-tracker] No checkpoint to recover")
+        return False
+
+    log(
+        f"[filament-tracker] "
+        f"Recovering checkpoint "
+        f"task={task_id} "
+        f"subtask={subtask_id}"
+    )
+
+    (
+        model_path,
+        gcode_file_name,
+        current_layer,
+        ams_mapping,
+    ) = result
+
+    # ------------------------------------------------------
+    # LOAD MODEL
+    # ------------------------------------------------------
+
     self._load_model(model_path, gcode_file_name)
-    self.spent_layers = set(range(current_layer + 1))
-    self.ams_mapping = ams_mapping
+
+    if self.active_model is None:
+        log(
+            "[filament-tracker] "
+            "Failed to restore model from checkpoint"
+        )
+        return False
+
+    # ------------------------------------------------------
+    # RESTORE TRACKING STATE
+    # ------------------------------------------------------
+
     self.current_layer = current_layer
+
+    # all previous layers already billed
+    self.spent_layers = set(range(current_layer))
+
+    self.ams_mapping = ams_mapping
     self.using_ams = ams_mapping is not None
-    
-    # Initialize cumulative usage from database to continue tracking correctly
+
+    # ------------------------------------------------------
+    # RESTORE LAYER TRACKING STATE
+    # ------------------------------------------------------
+
+    self._layer_tracking_total_layers = (
+        self._infer_total_layers()
+    )
+
+    self._accumulate_total_usage_mm()
+
+    self._layer_tracking_status = (
+        LAYER_TRACKING_STATUS_RUNNING
+    )
+
+    self._layer_tracking_start_time = now()
+
+    # ------------------------------------------------------
+    # RESTORE DB USAGE STATE
+    # ------------------------------------------------------
+
     self.cumulative_grams_used = {}
     self.cumulative_length_used = {}
+
     if self.print_id:
-      existing_usage = get_all_filament_usage_for_print(self.print_id)
-      for filament_id, usage in existing_usage.items():
-        grams_value = usage.get("grams_used") if isinstance(usage, dict) else usage
-        length_value = usage.get("length_used") if isinstance(usage, dict) else None
-        if grams_value is not None:
-          self.cumulative_grams_used[filament_id] = grams_value
-        if length_value is not None:
-          self.cumulative_length_used[filament_id] = length_value
-        log(f"[filament-tracker] Resumed cumulative usage for filament {filament_id}: {grams_value}g, {length_value or 0}mm")
+
+        existing_usage = (
+            get_all_filament_usage_for_print(
+                self.print_id
+            )
+        )
+
+        for filament_id, usage in existing_usage.items():
+
+            if isinstance(usage, dict):
+                grams_value = usage.get("grams_used")
+                length_value = usage.get("length_used")
+            else:
+                grams_value = usage
+                length_value = None
+
+            if grams_value is not None:
+                self.cumulative_grams_used[
+                    filament_id
+                ] = grams_value
+
+            if length_value is not None:
+                self.cumulative_length_used[
+                    filament_id
+                ] = length_value
+
+            log(
+                f"[filament-tracker] "
+                f"Restored filament {filament_id}: "
+                f"{grams_value}g, "
+                f"{length_value or 0}mm"
+            )
+
+    # ------------------------------------------------------
+    # RESTORE SPOOL CACHE
+    # ------------------------------------------------------
+
+    self._bind_initial_spools()
+
+    self._maybe_update_predicted_total()
+
+    self._update_layer_tracking_progress()
+
+    log(
+        f"[filament-tracker] "
+        f"Recovery successful "
+        f"(layer={current_layer})"
+    )
+
+    return True

@@ -210,10 +210,7 @@ class PrintContext:
 
         # handle LAN based
         if source_type in (JOB_TYPE_LOCAL):
-            task = self.get_task()
-            if task is not None:
-                self.task = task
-                ans = ((self.printer_state == STATE_PRINTING) and
+            ans = ((self.printer_state == STATE_PRINTING) and
                     (self.job_label is not None))          # job_label is known
 
         log(f"[DEBUG] Readiness: Source: {self.source_type} JobLabel={self.job_label} task={self.task}")

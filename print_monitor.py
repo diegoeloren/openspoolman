@@ -129,7 +129,7 @@ class PrintMonitor:
                 return PMS_IDLE
 
             if printer_state == STATE_PRINTING:
-                pass
+                return PMS_TRACKING
 
         if old_pms == PMS_IDLE:
             if ctx.is_triggered():
@@ -170,7 +170,10 @@ class PrintMonitor:
             self.on_prepare_start(ctx)
 
         elif new_pms == PMS_TRACKING:
-            self.on_print_started(ctx)
+            if old_pms == PMS_UNKNOWN:
+                self.on_restore_tracking(ctx)
+            else:
+                self.on_print_started(ctx)
 
         elif new_pms == PMS_DONE:
             self.on_print_done(ctx)
@@ -219,6 +222,22 @@ class PrintMonitor:
 
         if not started:
             log("[PMS EVENT] filament tracker failed to initialize")
+
+    def on_restore_tracking(self, ctx: PrintContext):
+        log("[PMS EVENT] attempting checkpoint recovery")
+
+        recovered = FILAMENT_TRACKER._attempt_print_resume(
+            ctx.get_task_id(),
+            ctx.get_subtask_id(),
+        )
+
+        if recovered:
+            log("[PMS EVENT] checkpoint restored")
+            return
+        log(
+            "[PMS EVENT] recovery failed, "
+            "tracker will remain inactive"
+        )
 
     def on_print_done(self, ctx: PrintContext):
         log(f"[PMS EVENT] print finished: {ctx.job_label}")
