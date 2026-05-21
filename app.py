@@ -13,6 +13,7 @@ from config import (
     SPOOLMAN_BASE_URL,
     EXTERNAL_SPOOL_AMS_ID,
     EXTERNAL_SPOOL_ID,
+    EXTERNAL_SPOOL_SLOT_ID,
     PRINTER_NAME,
     CLEAR_ASSIGNMENT_WHEN_EMPTY,
 )
@@ -408,6 +409,12 @@ def setActiveSpool(ams_id, tray_id, spool_data):
   ams_message["print"]["sequence_id"] = 0
   ams_message["print"]["ams_id"] = int(ams_id)
   ams_message["print"]["tray_id"] = int(tray_id)
+
+  if (int(ams_id) == EXTERNAL_SPOOL_AMS_ID) and (int(tray_id) == EXTERNAL_SPOOL_ID):
+    ams_message["print"]["slot_id"] = int(EXTERNAL_SPOOL_SLOT_ID)
+  else:
+    ams_message["print"]["slot_id"] = int(int(tray_id) % 4)
+
   color_hex = _select_spool_color_hex(spool_data)
   if color_hex:
     ams_message["print"]["tray_color"] = color_hex.upper() + "FF"

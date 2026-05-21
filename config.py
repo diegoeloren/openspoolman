@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 load_dotenv(Path(__file__).resolve().parent / "config.env")
 EXTERNAL_SPOOL_AMS_ID = 255 # don't change
 EXTERNAL_SPOOL_ID = 254 #  don't change
+EXTERNAL_SPOOL_SLOT_ID = 0 #  don't change
 
 builtins.print = partial(builtins.print, flush=True)
 

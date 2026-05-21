@@ -781,6 +781,7 @@ def clear_ams_tray_assignment(ams_id, tray_id):
   ams_message = copy.deepcopy(AMS_FILAMENT_SETTING)
   ams_message["print"]["ams_id"] = int(ams_id)
   ams_message["print"]["tray_id"] = int(tray_id)
+  ams_message["print"]["slot_id"] = int(int(tray_id) % 4)
   ams_message["print"]["tray_color"] = ""
   ams_message["print"]["nozzle_temp_min"] = None
   ams_message["print"]["nozzle_temp_max"] = None
