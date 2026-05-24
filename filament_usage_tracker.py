@@ -16,7 +16,7 @@ from spoolman_service import fetchSpools, parse_ams_mapping_value, trayUid
 from tools_3mf import download3mfFromCloud, download3mfFromFTP, download3mfFromLocalFilesystem
 from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking
 from logger import log
-from bambu_state import (
+from aux_fx import (
   extract_gcode_state,
   extract_prepare_percent,
   extract_print_status,
