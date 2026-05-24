@@ -198,6 +198,23 @@ def _resolve_tray_context(tray_index: int) -> Tuple[Optional[int], Optional[int]
 
   return None, None
 
+"""
+Used for AMS specific endpoints
+"""
+def _find_ams_by_id(config: Dict[str, Any], ams_id: int) -> Optional[Dict[str, Any]]:
+  for ams in config.get("ams", []):
+    if int(ams.get("id", -1)) == ams_id:
+      return ams
+
+  return None
+
+def _serialize_ams(ams: Dict[str, Any]) -> Dict[str, Any]:
+  return {
+      "ams_id": int(ams.get("id", 0)),
+      "humidity": ams.get("humidity"),
+      "humidity_raw": ams.get("humidity_raw"),
+      "temperature": ams.get("temp") or ams.get("temperature"),
+  }
 
 @api_bp.route("/printers", methods=["GET"])
 def api_list_printers():
@@ -322,3 +339,69 @@ def api_unassign_tray(printer_id: str, tray_index: int):
   except Exception as exc:
     traceback.print_exc()
     return json_error("UNASSIGN_FAILED", f"Failed to unassign tray: {exc}", 500)
+
+
+"""
+This route gives the environment of all ams connected
+"""
+@api_bp.route("/printers/<printer_id>/ams/env", methods=["GET"])
+def api_get_ams_environment(printer_id: str):
+  if not _printer_matches(printer_id):
+    return json_error("PRINTER_NOT_FOUND", f"Printer '{printer_id}' not found", 404)
+
+  try:
+    config = mqtt_bambulab.getLastAMSConfig() or {}
+
+    payload = {
+        "printer_id": ACTIVE_PRINTER_ID,
+        "ams": [
+            _serialize_ams(ams)
+            for ams in config.get("ams", [])
+        ]
+    }
+
+    return json_success(payload)
+
+  except Exception as exc:
+    traceback.print_exc()
+    return json_error(
+        "AMS_ENVIRONMENT_FETCH_FAILED",
+        f"Failed to fetch AMS environment data: {exc}",
+        500,
+    )
+
+
+"""
+Gets the environmental information of an ams
+"""
+@api_bp.route("/printers/<printer_id>/ams/<int:ams_id>/env", methods=["GET"])
+def api_get_single_ams_environment(printer_id: str, ams_id: int):
+  if not _printer_matches(printer_id):
+    return json_error("PRINTER_NOT_FOUND", f"Printer '{printer_id}' not found", 404)
+
+  try:
+    config = mqtt_bambulab.getLastAMSConfig() or {}
+
+    ams = _find_ams_by_id(config, ams_id)
+
+    if not ams:
+      return json_error(
+          "AMS_NOT_FOUND",
+          f"AMS '{ams_id}' not found",
+          404,
+      )
+
+    payload = {
+        "printer_id": ACTIVE_PRINTER_ID,
+        "ams": _serialize_ams(ams),
+    }
+
+    return json_success(payload)
+
+  except Exception as exc:
+    traceback.print_exc()
+    return json_error(
+        "AMS_ENVIRONMENT_FETCH_FAILED",
+        f"Failed to fetch AMS environment data: {exc}",
+        500,
+    )
