@@ -66,6 +66,9 @@ currency_symbols = {
 def get_currency_symbol(code):
     return currency_symbols.get(code, code)
 
+"""
+Encodes the Position for Spoolman
+"""
 def trayUid(ams_id, tray_id):
   return f"{PRINTER_ID}_{ams_id}_{tray_id}"
 

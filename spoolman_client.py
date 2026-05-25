@@ -40,8 +40,8 @@ def patchExtraTags(spool_id, old_extras, new_extras):
     payload={"extra": old_extras},
     status=resp.status_code,
   )
-  #print(resp.text)
-  #print(resp.status_code)
+  print(resp.text)
+  print(resp.status_code)
 
 
 def getSpoolById(spool_id):

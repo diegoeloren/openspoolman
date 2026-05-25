@@ -85,3 +85,38 @@ def is_print_final(gcode_state: str | None, print_status: str | None) -> bool:
   if print_status and print_status.upper() in FINAL_STATUS_STATES:
     return True
   return False
+
+def normalize_extra_value(value):
+  """
+  Normalize legacy Spoolman extra values.
+
+  Old versions stored values double-json-encoded:
+      "\"abc\""
+
+  This function converts:
+      "\"abc\"" -> "abc"
+
+  It also safely handles None and non-string values.
+  """
+
+  if value is None:
+    return ""
+
+  if not isinstance(value, str):
+    return str(value)
+
+  value = value.strip()
+
+  #
+  # Legacy double-stringified JSON
+  #
+  try:
+    parsed = json.loads(value)
+
+    if isinstance(parsed, str):
+      return parsed.strip()
+
+  except Exception:
+    pass
+
+  return value.strip().strip('"')  

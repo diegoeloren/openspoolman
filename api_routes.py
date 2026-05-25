@@ -1,6 +1,7 @@
 import json
 import os
 import traceback
+from logger import log
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, request
@@ -9,6 +10,7 @@ import mqtt_bambulab
 import spoolman_client
 import spoolman_service
 import test_data
+
 from config import EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID, PRINTER_ID, PRINTER_NAME
 
 API_VERSION = "v1"
@@ -216,6 +218,62 @@ def _serialize_ams(ams: Dict[str, Any]) -> Dict[str, Any]:
       "temperature": ams.get("temp") or ams.get("temperature"),
   }
 
+"""
+Gets the spool id if a tag is handed over
+"""
+def _find_spool_by_tag(spools: List[Dict[str, Any]], tag: str) -> Optional[Dict[str, Any]]:
+  for spool in spools:
+    extra = spool.get("extra", {}) or {}
+
+    spool_tag = _clean_json_value(extra.get("tag"))
+
+    if spool_tag and str(spool_tag) == str(tag):
+      return spool
+
+  return None
+
+"""
+Clears active tray for a certain tray_uid
+"""
+def _clear_existing_active_tray(spools: List[Dict[str, Any]], tray_uid: str):
+  for spool in spools:
+    extra = spool.get("extra", {}) or {}
+
+    active_tray = _clean_json_value(extra.get("active_tray"))
+
+    if active_tray == tray_uid:
+      spoolman_client.patchExtraTags(
+          spool["id"],
+          extra,
+          {"active_tray": ""}
+      )
+
+"""
+Used to check if the assignmet is existent in a physical ams endpoint.
+"""
+def _is_valid_ams_slot(ams_id: int, slot_id: int) -> bool:
+  #
+  # External spool special case
+  #
+  if ams_id == EXTERNAL_SPOOL_AMS_ID and slot_id == EXTERNAL_SPOOL_ID:
+    return True
+
+  config = mqtt_bambulab.getLastAMSConfig() or {}
+
+  for ams in config.get("ams", []):
+    current_ams_id = int(ams.get("id", -1))
+
+    if current_ams_id != ams_id:
+      continue
+
+    for tray in ams.get("tray", []):
+      current_slot_id = int(tray.get("id", -1))
+
+      if current_slot_id == slot_id:
+        return True
+
+  return False
+
 @api_bp.route("/printers", methods=["GET"])
 def api_list_printers():
   try:
@@ -403,5 +461,187 @@ def api_get_single_ams_environment(printer_id: str, ams_id: int):
     return json_error(
         "AMS_ENVIRONMENT_FETCH_FAILED",
         f"Failed to fetch AMS environment data: {exc}",
+        500,
+    )
+
+
+"""
+Assigns a spool to a tray by nfc-tag.
+"""
+@api_bp.route("/printers/<printer_id>/ams/<int:ams_id>/slot/<int:slot_id>/assign-by-tag",methods=["POST"],)
+def api_assign_by_tag(printer_id: str, ams_id: int, slot_id: int):
+  if not _printer_matches(printer_id):
+    return json_error(
+        "PRINTER_NOT_FOUND",
+        f"Printer '{printer_id}' not found",
+        404,
+    )
+
+  if READ_ONLY_MODE:
+    return json_error(
+        "READ_ONLY_MODE",
+        "Live read-only mode enabled.",
+        403,
+    )
+
+  #
+  # Validate AMS/slot combination
+  #
+  if not _is_valid_ams_slot(ams_id, slot_id):
+    return json_error(
+        "INVALID_AMS_SLOT",
+        f"AMS '{ams_id}' with slot '{slot_id}' does not exist",
+        404,
+    )
+
+  body = request.get_json(silent=True) or {}
+
+  tag = body.get("tag")
+
+  if not tag:
+    return json_error(
+        "INVALID_REQUEST",
+        "Field 'tag' is required.",
+        400,
+    )
+
+  try:
+    spools = spoolman_service.fetchSpools()
+
+    #
+    # Find spool by extra.tag
+    #
+    spool = _find_spool_by_tag(spools, tag)
+
+    if not spool:
+      return json_error(
+          "SPOOL_NOT_FOUND",
+          f"No spool found for tag '{tag}'",
+          404,
+      )
+
+    tray_uid = spoolman_service.trayUid(
+        #ACTIVE_PRINTER_ID,
+        ams_id,
+        slot_id,
+    )
+    #log(f"API Assignment - Spool: {spool}, locatior: {tray_uid}")
+
+    #
+    # Remove old spool currently assigned to this slot
+    #
+    for existing_spool in spools:
+      extra = existing_spool.get("extra", {}) or {}
+
+      active_tray = _clean_json_value(extra.get("active_tray"))
+      spool_id = existing_spool.get("id", {}) or {}
+
+      if active_tray is None:
+        continue
+
+      if active_tray == tray_uid:
+        log(f"@Spool {spool_id}: Active_tray {active_tray}, Looking for -> {tray_uid}, Attempt to delete entry")
+        spoolman_client.patchExtraTags(
+            spool_id,
+            extra,
+            {"active_tray": ""}
+        )
+
+    #
+    # Remove current slot assignment from this spool
+    #
+    spool_extra = spool.get("extra", {}) or {}
+
+    current_active_tray = _clean_json_value(
+        spool_extra.get("active_tray")
+    )
+
+    if current_active_tray and current_active_tray != tray_uid:
+      spoolman_client.patchExtraTags(
+          spool["id"],
+          spool_extra,
+          {"active_tray": ""}
+      )
+
+      #
+      # Refresh local copy
+      #
+      spool_extra["active_tray"] = ""
+
+    #
+    # Assign spool to new slot
+    #
+    spoolman_client.patchExtraTags(
+        spool["id"],
+        spool_extra,
+        {"active_tray": tray_uid}
+    )
+
+    return json_success({
+        "printer_id": ACTIVE_PRINTER_ID,
+        "ams_id": ams_id,
+        "slot_id": slot_id,
+        "tag": tag,
+        "spool_id": spool["id"],
+        "active_tray": tray_uid,
+        "assigned": True,
+    })
+
+  except Exception as exc:
+    traceback.print_exc()
+
+    return json_error(
+        "ASSIGN_FAILED",
+        f"Failed to assign spool by tag: {exc}",
+        500,
+    )
+
+"""
+Returns the nfc-tag id of a slot.
+"""
+@api_bp.route("/printers/<printer_id>/ams/<int:ams_id>/slot/<int:slot_id>/tag",methods=["GET"],)
+def api_get_tag_for_slot(printer_id: str, ams_id: int, slot_id: int):
+  if not _printer_matches(printer_id):
+    return json_error(
+        "PRINTER_NOT_FOUND",
+        f"Printer '{printer_id}' not found",
+        404,
+    )
+
+  try:
+    tray_uid = spoolman_service.trayUid(ams_id, slot_id)
+
+    spools = spoolman_service.fetchSpools()
+
+    for spool in spools:
+      extra = spool.get("extra", {}) or {}
+
+      active_tray = _clean_json_value(extra.get("active_tray"))
+
+      if active_tray == tray_uid:
+        tag = _clean_json_value(extra.get("tag"))
+
+        return json_success({
+            "printer_id": ACTIVE_PRINTER_ID,
+            "ams_id": ams_id,
+            "slot_id": slot_id,
+            "tag": tag,
+            "spool_id": spool["id"],
+        })
+
+    return json_success({
+        "printer_id": ACTIVE_PRINTER_ID,
+        "ams_id": ams_id,
+        "slot_id": slot_id,
+        "tag": None,
+        "spool_id": None,
+    })
+
+  except Exception as exc:
+    traceback.print_exc()
+
+    return json_error(
+        "TAG_FETCH_FAILED",
+        f"Failed to fetch tag for slot: {exc}",
         500,
     )
