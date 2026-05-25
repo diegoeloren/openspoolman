@@ -30,6 +30,36 @@ MODEL_CODE_TO_NAME = {
   "030": "A1 Mini",
 }
 
+PRINTING_GCODE_STATES = {"RUNNING", "PAUSE", "PAUSED"}
+FINAL_GCODE_STATES = {
+  "FINISH",
+  "FAILED",
+  "STOP",
+  "STOPPED",
+  "CANCEL",
+  "CANCELLED",
+  "CANCELED",
+  "ABORT",
+  "ABORTED",
+  "ERROR",
+  "IDLE",
+}
+
+PRINTING_STATUS_STATES = {"RUNNING", "PAUSE", "PAUSED"}
+FINAL_STATUS_STATES = {
+  "FINISH",
+  "FAILED",
+  "STOP",
+  "STOPPED",
+  "CANCEL",
+  "CANCELLED",
+  "CANCELED",
+  "ABORT",
+  "ABORTED",
+  "ERROR",
+  "IDLE",
+}
+
 def get_printer_model_name(printer_id: str | None) -> str:
   if not printer_id:
     return "Unknown"
