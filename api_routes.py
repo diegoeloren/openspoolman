@@ -570,6 +570,13 @@ def api_get_tag_for_slot(printer_id: str, ams_id: int, slot_id: int):
         404,
     )
 
+  if not _is_valid_ams_slot(ams_id, slot_id):
+    return json_error(
+        "INVALID_AMS_SLOT",
+        f"AMS '{ams_id}' with slot '{slot_id}' does not exist",
+        404,
+    )
+
   try:
     tray_uid = spoolman_service.trayUid(ams_id, slot_id)
 
