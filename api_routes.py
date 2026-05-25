@@ -5,7 +5,7 @@ from logger import log
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Blueprint, jsonify, request
-
+from app import setActiveSpool
 import mqtt_bambulab
 import spoolman_client
 import spoolman_service
@@ -350,7 +350,6 @@ def api_assign_tray(printer_id: str, tray_index: int):
     mqtt_bambulab.setActiveTray(spool_id, spool_data.get("extra"), ams_id, resolved_tray)
 
     # Reuse the existing assignment logic from app.setActiveSpool to keep behavior aligned with /fill.
-    from app import setActiveSpool  # Local import to avoid circular dependency at module load time
     setActiveSpool(ams_id, resolved_tray, spool_data)
   except Exception as exc:
     traceback.print_exc()
@@ -468,8 +467,15 @@ def api_get_single_ams_environment(printer_id: str, ams_id: int):
 """
 Assigns a spool to a tray by nfc-tag.
 """
-@api_bp.route("/printers/<printer_id>/ams/<int:ams_id>/slot/<int:slot_id>/assign-by-tag",methods=["POST"],)
-def api_assign_by_tag(printer_id: str, ams_id: int, slot_id: int):
+@api_bp.route(
+    "/printers/<printer_id>/ams/<int:ams_id>/slot/<int:slot_id>/assign-by-tag",
+    methods=["POST"],
+)
+def api_assign_by_tag(
+    printer_id: str,
+    ams_id: int,
+    slot_id: int,
+):
   if not _printer_matches(printer_id):
     return json_error(
         "PRINTER_NOT_FOUND",
@@ -484,9 +490,6 @@ def api_assign_by_tag(printer_id: str, ams_id: int, slot_id: int):
         403,
     )
 
-  #
-  # Validate AMS/slot combination
-  #
   if not _is_valid_ams_slot(ams_id, slot_id):
     return json_error(
         "INVALID_AMS_SLOT",
@@ -508,9 +511,6 @@ def api_assign_by_tag(printer_id: str, ams_id: int, slot_id: int):
   try:
     spools = spoolman_service.fetchSpools()
 
-    #
-    # Find spool by extra.tag
-    #
     spool = _find_spool_by_tag(spools, tag)
 
     if not spool:
@@ -520,61 +520,24 @@ def api_assign_by_tag(printer_id: str, ams_id: int, slot_id: int):
           404,
       )
 
-    tray_uid = spoolman_service.trayUid(
-        #ACTIVE_PRINTER_ID,
+    spool_id = spool["id"]
+
+    #
+    # Reuse existing assignment logic
+    #
+    spool_data = spoolman_client.getSpoolById(spool_id)
+
+    mqtt_bambulab.setActiveTray(
+        spool_id,
+        spool_data.get("extra"),
         ams_id,
         slot_id,
     )
-    #log(f"API Assignment - Spool: {spool}, locatior: {tray_uid}")
 
-    #
-    # Remove old spool currently assigned to this slot
-    #
-    for existing_spool in spools:
-      extra = existing_spool.get("extra", {}) or {}
-
-      active_tray = _clean_json_value(extra.get("active_tray"))
-      spool_id = existing_spool.get("id", {}) or {}
-
-      if active_tray is None:
-        continue
-
-      if active_tray == tray_uid:
-        log(f"@Spool {spool_id}: Active_tray {active_tray}, Looking for -> {tray_uid}, Attempt to delete entry")
-        spoolman_client.patchExtraTags(
-            spool_id,
-            extra,
-            {"active_tray": ""}
-        )
-
-    #
-    # Remove current slot assignment from this spool
-    #
-    spool_extra = spool.get("extra", {}) or {}
-
-    current_active_tray = _clean_json_value(
-        spool_extra.get("active_tray")
-    )
-
-    if current_active_tray and current_active_tray != tray_uid:
-      spoolman_client.patchExtraTags(
-          spool["id"],
-          spool_extra,
-          {"active_tray": ""}
-      )
-
-      #
-      # Refresh local copy
-      #
-      spool_extra["active_tray"] = ""
-
-    #
-    # Assign spool to new slot
-    #
-    spoolman_client.patchExtraTags(
-        spool["id"],
-        spool_extra,
-        {"active_tray": tray_uid}
+    setActiveSpool(
+        ams_id,
+        slot_id,
+        spool_data,
     )
 
     return json_success({
@@ -582,8 +545,7 @@ def api_assign_by_tag(printer_id: str, ams_id: int, slot_id: int):
         "ams_id": ams_id,
         "slot_id": slot_id,
         "tag": tag,
-        "spool_id": spool["id"],
-        "active_tray": tray_uid,
+        "spool_id": spool_id,
         "assigned": True,
     })
 
