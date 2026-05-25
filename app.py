@@ -19,10 +19,10 @@ from config import (
 )
 
 # Debugging
-import debugpy
-debugpy.listen(("0.0.0.0", 5678))
-print("Waiting for debugger...")
-debugpy.wait_for_client()
+#import debugpy
+#debugpy.listen(("0.0.0.0", 5678))
+#print("Waiting for debugger...")
+#debugpy.wait_for_client()
 # Debuggin end
 
 from filament import generate_filament_brand_code, generate_filament_temperatures
