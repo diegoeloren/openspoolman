@@ -5,8 +5,8 @@ The scope of this fork was to get Openspoolman running reliable for my X1C in LA
 I am not interested in cloud prints.
 It wasn't working properly with my setup: In terms of filament usage and print history was not properly filled (duplicate prints):
 - I faced some issue with assigning PETG-CF and ASA-CF. (Fixed)
-- I didn't understand the mechanics of bambu_qtt.py     
-- I want to extend some api commands for pushing tags automatically via ESP32 and mini-nfc modules in the ams/external spool. (Open)
+- I didn't understand the mechanics of bambu_qtt.py (Done)
+- I want to extend some api commands for pushing tags automatically via ESP32 and mini-nfc modules in the ams/external spool. (Done)
 
 
 ### News
