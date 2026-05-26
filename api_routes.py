@@ -589,6 +589,9 @@ def api_get_tag_for_slot(printer_id: str, ams_id: int, slot_id: int):
 
       if active_tray == tray_uid:
         tag = _clean_json_value(extra.get("tag"))
+        filament = spool["filament"]
+        material = filament.get("material") or ""
+        color = filament.get("color_hex") or ""
 
         return json_success({
             "printer_id": ACTIVE_PRINTER_ID,
@@ -596,6 +599,8 @@ def api_get_tag_for_slot(printer_id: str, ams_id: int, slot_id: int):
             "slot_id": slot_id,
             "tag": tag,
             "spool_id": spool["id"],
+            "material": material,
+            "color_hex": color,
         })
 
     return json_success({
