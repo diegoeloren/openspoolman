@@ -312,7 +312,7 @@ class PrintContext:
         """
         Extracts the task name
         """
-        task = self.summary.get("subtask_name")
+        task = self.summary.get("subtask_name") or self.get_job_label()
         if task:
             return task
         return None

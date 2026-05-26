@@ -75,11 +75,6 @@ class PrintMonitor:
                 f"[PMS] {printer_id}: {old_pms} -> {new_pms} "
                 f"(printer={ctx.printer_state})"
             )
-        else:
-            log(
-                f"[PMS] {printer_id}: {new_pms} "
-                f"(printer={ctx.printer_state})"
-            )
 
         # --------------------------------------------------------
         # FILAMENT TRACKER RUNTIME

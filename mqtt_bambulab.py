@@ -509,7 +509,7 @@ def on_message(client, userdata, msg):
     if "print" in data and "ams" in data["print"] and "ams" in data["print"]["ams"]:
       LAST_AMS_CONFIG["ams"] = data["print"]["ams"]["ams"]
       for ams in data["print"]["ams"]["ams"]:
-        log(f"AMS [{num2letter(ams['id'])}] (hum: {ams['humidity']}, temp: {ams['temp']}ºC)")
+        #log(f"AMS [{num2letter(ams['id'])}] (hum: {ams['humidity']}, temp: {ams['temp']}ºC)")
         for tray in ams["tray"]:
           if "tray_sub_brands" in tray:
             #log(f"    - [{num2letter(ams['id'])}{tray['id']}] {tray['tray_sub_brands']} {tray['tray_color']} ({str(tray['remain']).zfill(3)}%) [[ {tray['tray_uuid']} ]]")
