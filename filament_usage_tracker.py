@@ -22,7 +22,7 @@ from aux_fx import (
   extract_print_status,
   is_print_active,
   is_print_final,
-  normalize_prepare_percent,
+  normalize_percent,
 )
 
 

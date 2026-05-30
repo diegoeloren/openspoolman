@@ -593,6 +593,18 @@ def api_get_tag_for_slot(printer_id: str, ams_id: int, slot_id: int):
         material = filament.get("material") or ""
         color = filament.get("color_hex") or ""
 
+        percent = 100
+
+        if(spool.get("initial_weight") and spool.get("remaining_weight")):
+          total_weight = spool.get("initial_weight")
+          remaining_weight = spool.get("remaining_weight")
+          percent = int(remaining_weight / total_weight * 100)
+
+        elif(spool.get("used_length") and spool.get("remaining_length")):
+          rem_length = spool.get("remaining_length")
+          used_length = spool.get("used_length")
+          percent = int(rem_length / (rem_length+used_length) * 100)
+
         return json_success({
             "printer_id": ACTIVE_PRINTER_ID,
             "ams_id": ams_id,
@@ -601,6 +613,7 @@ def api_get_tag_for_slot(printer_id: str, ams_id: int, slot_id: int):
             "spool_id": spool["id"],
             "material": material,
             "color_hex": color,
+            "used" : percent,
         })
 
     return json_success({
@@ -609,6 +622,7 @@ def api_get_tag_for_slot(printer_id: str, ams_id: int, slot_id: int):
         "slot_id": slot_id,
         "tag": None,
         "spool_id": None,
+        "used" : None,
     })
 
   except Exception as exc:

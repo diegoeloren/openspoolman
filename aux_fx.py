@@ -83,8 +83,7 @@ def extract_print_status(payload: dict) -> str | None:
 def extract_prepare_percent(payload: dict) -> int | None:
   return get_print_block(payload).get("gcode_file_prepare_percent")
 
-
-def normalize_prepare_percent(value: Any) -> int | None:
+def normalize_percent(value: Any) -> int | None:
   if value is None:
     return None
   if isinstance(value, str):
