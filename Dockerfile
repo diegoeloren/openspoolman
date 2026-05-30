@@ -25,8 +25,8 @@ RUN export FLASK_APP=src/app.py
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Debuggen
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install debugpy
+#RUN pip install --no-cache-dir -r requirements.txt
+#RUN pip install debugpy
 
 
 
