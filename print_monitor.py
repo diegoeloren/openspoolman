@@ -209,7 +209,7 @@ class PrintMonitor:
             print_metadata=meta,
             model_path=meta.get("downloaded_model_path"),
             gcode_file_name=meta.get("gcode_path"),
-            use_ams=bool(ctx.get_mapping()),
+            use_ams=ctx.get_ams_usage(),
             ams_mapping=ctx.get_mapping(),
             task_id=ctx.get_task_id(),
             subtask_id=ctx.get_subtask_id(),
