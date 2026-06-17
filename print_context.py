@@ -170,6 +170,7 @@ class PrintContext:
         """
         if not self.is_ready():
             return False
+        log(f"[DEBUG] Readiness: Source: {self.source_type} JobLabel={self.job_label} task={self.task}")
         return self.is_prepared()
 
     def is_tracking(self) -> bool:
@@ -212,8 +213,6 @@ class PrintContext:
         if source_type in (JOB_TYPE_LOCAL):
             ans = ((self.printer_state == STATE_PRINTING) and
                     (self.job_label is not None))          # job_label is known
-
-        log(f"[DEBUG] Readiness: Source: {self.source_type} JobLabel={self.job_label} task={self.task}")
     
         return ans
     
@@ -371,7 +370,8 @@ class PrintContext:
         """
         Concatenates all basic attributes to one string
         """
-        sum = f"timestamp: {self.timestamp} | printer_id: {self.printer_id} | printer_state: {self.printer_state} | source_type: {self.source_type} | job_label: {self.job_label} | task: {self.task} | print_id: {self.print_id} | tracking_started: {self.tracking_started} | download_done: {self.download_done} | using_ams: {self.get_ams_usage()}"
+        use_ams_raw = self.summary.get("use_ams")
+        sum = f"timestamp: {self.timestamp} | printer_id: {self.printer_id} | printer_state: {self.printer_state} | source_type: {self.source_type} | job_label: {self.job_label} | task: {self.task} | print_id: {self.print_id} | tracking_started: {self.tracking_started} | download_done: {self.download_done} | using_ams: {self.get_ams_usage()} | use_ams_raw: {use_ams_raw}"
         return sum
 
     def is_downloaded(self):
