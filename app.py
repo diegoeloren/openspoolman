@@ -722,6 +722,7 @@ def print_select_spool():
       'print_select_spool.html',
       spools=spools,
       filament_id=filament_id,
+      ams_slot=filament_id,
       print_id=print_id,
       old_spool_id=old_spool_id,
       change_spool=change_spool,
