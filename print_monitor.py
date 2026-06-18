@@ -81,6 +81,8 @@ class PrintMonitor:
         # --------------------------------------------------------
 
         if FILAMENT_TRACKER.active_model is not None:
+            # Pass the full print-block so LiveTrayResolver can read
+            # ams_status, tray_now, tray_pre and extruder.star
             FILAMENT_TRACKER.handle_runtime_message(ctx.last_raw)
 
         if new_pms == PMS_TRACKING:
@@ -209,8 +211,6 @@ class PrintMonitor:
             print_metadata=meta,
             model_path=meta.get("downloaded_model_path"),
             gcode_file_name=meta.get("gcode_path"),
-            use_ams=ctx.get_ams_usage(),
-            ams_mapping=ctx.get_mapping(),
             task_id=ctx.get_task_id(),
             subtask_id=ctx.get_subtask_id(),
         )

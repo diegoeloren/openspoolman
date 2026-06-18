@@ -16,6 +16,7 @@ from spoolman_service import fetchSpools, parse_ams_mapping_value, trayUid
 from tools_3mf import download3mfFromCloud, download3mfFromFTP, download3mfFromLocalFilesystem
 from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking
 from logger import log
+from live_tray_resolver import LiveTrayResolver
 from aux_fx import (
   extract_gcode_state,
   extract_prepare_percent,
@@ -66,7 +67,7 @@ def _save_checkpoint_metadata(metadata: dict) -> None:
   _checkpoint_metadata_path().write_text(json.dumps(metadata))
 
 
-def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id, ams_mapping, gcode_file_name: str) -> None:
+def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id, gcode_file_name: str, gcode_filament_sequence: list | None = None) -> None:
   dest = _checkpoint_dir() / "model.3mf"
   dest.write_bytes(Path(model_path).read_bytes())
 
@@ -74,8 +75,9 @@ def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id,
   existing["task_id"] = task_id
   existing["subtask_id"] = subtask_id
   existing["current_layer"] = current_layer
-  existing["ams_mapping"] = ams_mapping
+  existing["gcode_filament_sequence"] = gcode_filament_sequence or []
   existing["gcode_file_name"] = gcode_file_name
+  existing.pop("ams_mapping", None)
   _save_checkpoint_metadata(existing)
 
 
@@ -113,13 +115,13 @@ def recover_model(task_id, subtask_id):
     return None
 
   current_layer = metadata.get("current_layer")
-  ams_mapping = metadata.get("ams_mapping")
   gcode_file_name = metadata.get("gcode_file_name")
+  gcode_filament_sequence = metadata.get("gcode_filament_sequence") or []
 
   if current_layer is None or gcode_file_name is None:
     return None
 
-  return str(model_path), gcode_file_name, current_layer, ams_mapping
+  return str(model_path), gcode_file_name, current_layer, gcode_filament_sequence
 
 
 class GCodeOperation:
@@ -222,9 +224,8 @@ def extract_gcode_from_3mf(path: str, gcode_path: str | None) -> str | None:
 class FilamentUsageTracker:
   def __init__(self):
     self.active_model = None
-    self.ams_mapping = None
+    self._resolver = LiveTrayResolver()
     self.spent_layers = set()
-    self.using_ams = False
     self.gcode_state = None
     self.current_layer = None
     self.print_metadata = None
@@ -269,8 +270,6 @@ class FilamentUsageTracker:
       print_metadata: dict,
       model_path: str,
       gcode_file_name: str | None,
-      use_ams: bool,
-      ams_mapping: list[int] | None,
       task_id,
       subtask_id,
   ) -> bool:
@@ -294,26 +293,12 @@ class FilamentUsageTracker:
       self.cumulative_length_used = {}
 
       # ------------------------------------------------------
-      # AMS
+      # RESOLVER
       # ------------------------------------------------------
 
-      if use_ams:
-          self.ams_mapping = ams_mapping or []
-          self.using_ams = True
-
-          log(
-              f"[filament-tracker] "
-              f"Using AMS mapping: {self.ams_mapping}"
-          )
-
-      else:
-          self.using_ams = False
-          self.ams_mapping = None
-
-          log(
-              "[filament-tracker] "
-              "Not using AMS, defaulting to external spool"
-          )
+      # gcode_filament_sequence is extracted from the model after load
+      # and passed to the resolver so it knows which filament_index
+      # to bind at each SETTLED event.
 
       # ------------------------------------------------------
       # LOAD MODEL
@@ -335,9 +320,11 @@ class FilamentUsageTracker:
       self._layer_tracking_start_time = now()
 
       # ------------------------------------------------------
-      # INITIAL SPOOL BINDING
+      # RESOLVER START
       # ------------------------------------------------------
-      self._bind_initial_spools()
+      gcode_sequence = self._extract_gcode_filament_sequence()
+      self._resolver.start_print(gcode_sequence)
+      log(f"[filament-tracker] LiveTrayResolver started, sequence={gcode_sequence}")
       self._maybe_update_predicted_total()
 
       # ------------------------------------------------------
@@ -374,8 +361,8 @@ class FilamentUsageTracker:
           current_layer=0,
           task_id=task_id,
           subtask_id=subtask_id,
-          ams_mapping=self.ams_mapping,
           gcode_file_name=gcode_file_name,
+          gcode_filament_sequence=self._extract_gcode_filament_sequence(),
       )
 
       log("[filament-tracker] Print initialized")
@@ -429,6 +416,13 @@ class FilamentUsageTracker:
           "gcode_state",
           self.gcode_state,
       )
+
+      # ------------------------------------------------------
+      # LIVE TRAY RESOLVER
+      # ------------------------------------------------------
+
+      if self.active_model is not None:
+          self._resolver.update(print_obj)
 
       # ------------------------------------------------------
       # REMAINING TIME
@@ -510,21 +504,9 @@ class FilamentUsageTracker:
           )
 
   def apply_ams_mapping(self, ams_mapping: list[int] | None) -> None:
-    if not ams_mapping:
-      return
-    if self.ams_mapping == ams_mapping and self.using_ams:
-      return
-
-    log(f"[filament-tracker] Applying AMS mapping: {ams_mapping}")
-    self.ams_mapping = ams_mapping
-    self.using_ams = True
-    if self.print_metadata is not None:
-      self.print_metadata["ams_mapping"] = ams_mapping
-
-    self._bind_initial_spools()
-    self._flush_all_pending_usage()
-    self._maybe_update_predicted_total()
-    self._update_layer_tracking_progress()
+    """Deprecated: AMS mapping is now resolved live via LiveTrayResolver."""
+    log("[filament-tracker] apply_ams_mapping() called but is now a no-op "
+        "(live resolver handles mapping automatically)")
 
   def _retrieve_model(self, model_url: str | None) -> str | None:
     if not model_url:
@@ -588,9 +570,8 @@ class FilamentUsageTracker:
           extra_fields={"actual_end_time": self._format_timestamp(now())},
       )
 
+    self._resolver.stop_print()
     self.active_model = None
-    self.ams_mapping = None
-    self.using_ams = False
     self.current_layer = None
     self.print_metadata = None
     self.print_id = None
@@ -613,9 +594,8 @@ class FilamentUsageTracker:
           extra_fields={"actual_end_time": self._format_timestamp(now())},
       )
 
+    self._resolver.stop_print()
     self.active_model = None
-    self.ams_mapping = None
-    self.using_ams = False
     self.current_layer = None
     self.print_metadata = None
     self.print_id = None
@@ -823,6 +803,24 @@ class FilamentUsageTracker:
     if self.print_id:
       update_layer_tracking(self.print_id, filament_grams_total=round(total_grams, 2))
 
+  def _extract_gcode_filament_sequence(self) -> list[int]:
+    """
+    Returns the ordered list of filament indices as they appear in the
+    GCode (order of first M620 use per filament).  Used by LiveTrayResolver
+    to know which filament_index to bind at each SETTLED event.
+    """
+    if not self.active_model:
+      return []
+    seen: list[int] = []
+    seen_set: set[int] = set()
+    # active_model keys are layers; values are {filament_index: mm}
+    for layer in sorted(self.active_model.keys()):
+      for fi in self.active_model[layer]:
+        if fi not in seen_set:
+          seen.append(fi)
+          seen_set.add(fi)
+    return seen
+
   def _bind_initial_spools(self) -> None:
     if not self.print_id:
       return
@@ -898,12 +896,12 @@ class FilamentUsageTracker:
     return trayUid(entry["ams_id"], entry["slot_id"])
 
   def _resolve_tray_mapping(self, filament_index: int) -> int | None:
-    if self.using_ams:
-      if self.ams_mapping is None or filament_index >= len(self.ams_mapping):
-        log(f"No AMS mapping for filament {filament_index}")
+      tray_id = self._resolver.resolve(filament_index)
+      if tray_id is None:
         return None
-      return self.ams_mapping[filament_index]
-    return EXTERNAL_SPOOL_ID
+      if tray_id == 254:
+        return EXTERNAL_SPOOL_ID
+      return tray_id
 
   def _resolve_filament_id(self, filament_index: int) -> int | None:
     metadata = self.print_metadata or {}
@@ -979,7 +977,7 @@ class FilamentUsageTracker:
         model_path,
         gcode_file_name,
         current_layer,
-        ams_mapping,
+        gcode_filament_sequence,
     ) = result
 
     # ------------------------------------------------------
@@ -1004,8 +1002,8 @@ class FilamentUsageTracker:
     # all previous layers already billed
     self.spent_layers = set(range(current_layer))
 
-    self.ams_mapping = ams_mapping
-    self.using_ams = ams_mapping is not None
+    # Restart resolver — it will re-learn mappings from live MQTT
+    self._resolver.start_print(gcode_filament_sequence)
 
     # ------------------------------------------------------
     # RESTORE LAYER TRACKING STATE
