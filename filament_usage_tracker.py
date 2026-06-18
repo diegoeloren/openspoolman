@@ -323,7 +323,10 @@ class FilamentUsageTracker:
       # RESOLVER START
       # ------------------------------------------------------
       gcode_sequence = self._extract_gcode_filament_sequence()
-      self._resolver.start_print(gcode_sequence)
+      self._resolver.start_print(
+          gcode_sequence,
+          on_settled=self._on_tray_settled,
+      )
       log(f"[filament-tracker] LiveTrayResolver started, sequence={gcode_sequence}")
       self._maybe_update_predicted_total()
 
@@ -803,6 +806,17 @@ class FilamentUsageTracker:
     if self.print_id:
       update_layer_tracking(self.print_id, filament_grams_total=round(total_grams, 2))
 
+  def _on_tray_settled(self, filament_index: int, tray_id: int) -> None:
+    """
+    Callback from LiveTrayResolver: called immediately when a
+    filament_index -> tray_id binding is confirmed (SETTLED).
+    Flushes any pending usage for this filament right away.
+    """
+    log(f"[filament-tracker] tray settled: filament {filament_index} -> tray {tray_id}, flushing pending usage")
+    self._apply_usage_for_filament(filament_index, 0.0)
+    self._maybe_update_predicted_total()
+    self._update_layer_tracking_progress()
+
   def _extract_gcode_filament_sequence(self) -> list[int]:
     """
     Returns the ordered list of filament indices as they appear in the
@@ -896,12 +910,25 @@ class FilamentUsageTracker:
     return trayUid(entry["ams_id"], entry["slot_id"])
 
   def _resolve_tray_mapping(self, filament_index: int) -> int | None:
-      tray_id = self._resolver.resolve(filament_index)
-      if tray_id is None:
-        return None
-      if tray_id == 254:
-        return EXTERNAL_SPOOL_ID
-      return tray_id
+    """Resolve filament_index -> mapping_value via LiveTrayResolver.
+
+    parse_ams_mapping_value() heuristic (spoolman_service.py):
+      v < 128  ->  ams_id = v // 4,  slot_id = v % 4
+      v == 254 ->  external spool
+      v == 255 ->  unload
+
+    tray_id as reported by MQTT (tray_now) uses the same encoding:
+      tray_id = ams_id * 4 + slot_id
+
+    So tray_id IS the mapping_value directly for AMS trays 0-127.
+    """
+    tray_id = self._resolver.resolve(filament_index)
+    if tray_id is None:
+      return None  # not yet confirmed -- caller buffers usage
+    if tray_id == 254:  # external spool sentinel
+      return EXTERNAL_SPOOL_ID
+    # tray_id 0-127: directly usable as mapping_value
+    return tray_id
 
   def _resolve_filament_id(self, filament_index: int) -> int | None:
     metadata = self.print_metadata or {}
@@ -1003,7 +1030,10 @@ class FilamentUsageTracker:
     self.spent_layers = set(range(current_layer))
 
     # Restart resolver — it will re-learn mappings from live MQTT
-    self._resolver.start_print(gcode_filament_sequence)
+    self._resolver.start_print(
+        gcode_filament_sequence,
+        on_settled=self._on_tray_settled,
+    )
 
     # ------------------------------------------------------
     # RESTORE LAYER TRACKING STATE

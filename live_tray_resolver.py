@@ -106,12 +106,17 @@ class LiveTrayResolver:
         self._prev_tray_now: int | None = None
         self._prev_star: int | None = None
         self._swap_count: int = 0
-        self._gcode_filament_sequence: list[int] = []  # from GCode parser
+        self._gcode_filament_sequence: list[int] = []
         self._active = False
+        self._on_settled_callback = None  # callable(filament_index, tray_id) | None
 
     # ── public API ──────────────────────────────────────────────────────────
 
-    def start_print(self, gcode_filament_sequence: list[int] | None = None) -> None:
+    def start_print(
+        self,
+        gcode_filament_sequence: list[int] | None = None,
+        on_settled=None,
+    ) -> None:
         """
         Reset resolver state for a new print.
 
@@ -119,6 +124,11 @@ class LiveTrayResolver:
         appear in the GCode (from evaluate_gcode M620 order).
         Example: [0, 1, 0, 2]  means the GCode uses filament 0 first,
         then switches to 1, back to 0, then 2.
+
+        on_settled: optional callable(filament_index: int, tray_id: int)
+        Called immediately when a binding is confirmed (SETTLED).
+        Use this to flush pending usage right away instead of waiting
+        for the next layer commit.
         """
         self._index_to_tray = {}
         self._pending_filament_index = None
@@ -127,6 +137,7 @@ class LiveTrayResolver:
         self._prev_star = None
         self._swap_count = 0
         self._gcode_filament_sequence = list(gcode_filament_sequence or [])
+        self._on_settled_callback = on_settled
         self._active = True
         log("[LiveTrayResolver] started, gcode_sequence="
             f"{self._gcode_filament_sequence}")
@@ -249,6 +260,12 @@ class LiveTrayResolver:
         log(f"[LiveTrayResolver] SETTLED #{self._swap_count}: "
             f"filament_index={filament_index} → tray={tray_now} "
             f"(map={self._index_to_tray})")
+
+        if self._on_settled_callback is not None:
+            try:
+                self._on_settled_callback(filament_index, tray_now)
+            except Exception as exc:
+                log(f"[LiveTrayResolver] on_settled callback error: {exc}")
 
     def _next_pending_filament_index(self) -> int | None:
         """
