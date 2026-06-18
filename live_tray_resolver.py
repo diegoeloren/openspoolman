@@ -235,10 +235,26 @@ class LiveTrayResolver:
         """
         A filament swap has completed and tray_now is confirmed stable.
         Bind the pending filament_index to this tray.
+
+        Binding rules:
+          _swap_count == 0 AND _pending_filament_index is None:
+            First startup load — bind the first GCode filament index.
+            This happens exactly once per print.
+
+          _pending_filament_index is not None:
+            A swap was announced (star changed) — bind that index.
+
+          All other SETTLED events (no announcement, not startup):
+            Ignore. These occur during leveling, purging, and other
+            printer routines that touch the AMS without a real swap.
         """
         if self._pending_filament_index is None:
-            # Startup: first SETTLED without prior swap announcement.
-            # Bind the first GCode filament index.
+            if self._swap_count > 0:
+                # Not a real swap — leveling/purge/other routine.
+                log(f"[LiveTrayResolver] SETTLED tray={tray_now} ignored "
+                    "(no swap announced, not startup)")
+                return
+            # swap_count == 0: first startup load — bind first GCode filament.
             filament_index = self._next_pending_filament_index()
             if filament_index is None:
                 log(f"[LiveTrayResolver] SETTLED tray={tray_now} "
