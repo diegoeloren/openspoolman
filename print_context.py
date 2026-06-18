@@ -356,10 +356,10 @@ class PrintContext:
         return self.summary
 
     def get_ams_usage(self) -> bool:
-        use_ams_raw = self.summary.get("use_ams",False)
+        use_ams_raw = self.summary.get("use_ams")
         use_ams = None
         if use_ams_raw is None:
-            use_ams = history_print_type == "local"
+            use_ams = (self.get_source_type() in (JOB_TYPE_LAN, JOB_TYPE_CLOUD))
         elif isinstance(use_ams_raw, str):
             use_ams = use_ams_raw.strip().lower() in ("1", "true", "yes", "on")
         else:
@@ -371,7 +371,7 @@ class PrintContext:
         Concatenates all basic attributes to one string
         """
         use_ams_raw = self.summary.get("use_ams")
-        sum = f"timestamp: {self.timestamp} | printer_id: {self.printer_id} | printer_state: {self.printer_state} | source_type: {self.source_type} | job_label: {self.job_label} | task: {self.task} | print_id: {self.print_id} | tracking_started: {self.tracking_started} | download_done: {self.download_done} | using_ams: {self.get_ams_usage()} | use_ams_raw: {use_ams_raw}"
+        sum = f"timestamp: {self.timestamp} | printer_id: {self.printer_id} | printer_state: {self.printer_state} | source_type: {self.source_type} | job_label: {self.job_label} | task: {self.task} | print_id: {self.print_id} | tracking_started: {self.tracking_started} | download_done: {self.download_done} | using_ams(fx): {self.get_ams_usage()} | use_ams_raw: {use_ams_raw}"
         return sum
 
     def is_downloaded(self):
