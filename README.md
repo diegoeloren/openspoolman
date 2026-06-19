@@ -1,23 +1,101 @@
-# <img alt="logo" src="static/logo.png" height="36" /> OpenSpoolMan 
+# <img alt="logo" src="static/logo.png" height="36" /> OpenSpoolMan — diegoeloren fork
+
+> **Forked from [drndos/openspoolman](https://github.com/drndos/openspoolman)**
+> This fork targets reliable operation on a **Bambu Lab X1C in LAN-only / Developer Mode** without any cloud dependency.
+
+---
+
+## What this fork changes vs. the original
+
+### 🆕 Live MQTT-based AMS tray resolver (`LiveTrayResolver`)
+
+The original openspoolman relies on `ams_mapping` metadata from the `project_file` MQTT command to assign filaments to trays. This only works for **cloud-initiated prints** — LAN and local prints don't carry this metadata.
+
+This fork replaces the static mapping approach with a **live MQTT signal observer** (`live_tray_resolver.py`) that watches AMS state transitions in real time:
+
+- Detects filament swap announcements via `extruder.star` changes
+- Confirms tray bindings at **SETTLED** state (`ams_status & 0x300 == 0x300` AND `tray_pre == tray_now`)
+- Works for **all job sources**: LAN, LOCAL (sdcard), LOCAL (repeat-print / "Erneut drucken"), CLOUD
+- Guards against spurious SETTLED events during bed leveling and purging
+
+### 🆕 Multi-buildplate support with correct per-plate filament filtering
+
+The original code collected filaments from **all plates** in `slice_info.config`, leading to phantom filament entries in print history for plates not being printed.
+
+This fork:
+- Reads `plate_idx` from MQTT (`push_status`) to identify the active plate
+- Passes `plate_idx` through to `getMetaDataFrom3mf()` which now filters filaments per plate
+- Reads `filament_sequence.json` from the 3MF archive as the authoritative swap sequence source (filament IDs, not AMS slot indices)
+- Fixes incorrect startup tray binding when the printer switches filament immediately at job start (e.g. Plate 2 starting with a different filament than what was loaded from Plate 1)
+
+### 🆕 "Erneut drucken" / repeat-print support
+
+When a print is started via the printer's "Print again" button, the MQTT URL is `file:///userdata/project_file.gcode.3mf` — a generic placeholder that cannot be fetched via FTP. This fork:
+
+- Detects this case via `"project_file.gcode" in url`
+- Falls back to the cached 3MF from the last LAN/LOCAL print (`data/cache/<printer_id>.3mf`)
+- Other LOCAL jobs (`file:///sdcard/...`) with real filenames continue to be fetched via FTP as normal
+
+### 🆕 `print_id` persisted in checkpoint
+
+On resume after a restart, the original code lost `print_id` — all DB writes after recovery went nowhere. This fork stores `print_id` in the checkpoint metadata and restores it on resume.
+
+### 🆕 Filament DB inserts moved from `PrintMonitor` into `FilamentUsageTracker`
+
+Previously `PrintMonitor.apply_filaments()` inserted filament rows at PREPARE time using all filaments from all plates. Now:
+
+- `PrintMonitor` only calls `insert_print()` and `set_tracking()` — pure job management
+- `FilamentUsageTracker.start_print()` receives the plate-filtered filament dict and calls `_apply_filaments()` internally
+- `print_history` is a pure DB interface with no logic
+
+### 🐛 Bug fixes vs. original
+
+| Bug | Fix |
+|-----|-----|
+| Crash on repeat-print: `zipfile.ZipFile(None)` | `_load_model()` guards against `model_path=None`; `download()` sets `download_done = bool(metadata)` instead of unconditional `True` |
+| `get_metadata()` crash when `metadata is None` | `if self.metadata is None: self.metadata = {}` guard added |
+| `NameError: name 'reason'` in `download()` exception handler | Removed undefined variable |
+| All filaments from all plates inserted into print history | Per-plate filtering via `plate_idx` from MQTT |
+| Wrong filament→tray binding when Plate 2 starts with a filament not in Plate 2 | Startup SETTLED skipped when `star` already points to a different tray |
+| `print_id = None` after checkpoint recovery | `print_id` now stored in and restored from checkpoint |
+| M620 slot indices used as filament indices in resolver (off-by-one for multi-plate) | `filament_sequence.json` used as swap sequence source (filament IDs directly) |
+
+### 🧹 Removed relics
+
+The following were made obsolete by the `LiveTrayResolver` and have been removed:
+
+- `PrintContext.get_ams_usage()` and `metadata["use_ams"]`
+- `PrintContext.get_mapping()` (`ams_mapping` passthrough)
+- `FilamentUsageTracker.apply_ams_mapping()` (was already a no-op)
+- `FilamentUsageTracker._retrieve_model()` (replaced by `_load_model()`)
+- `import tempfile`, `from urllib.parse import urlparse`, `download3mfFromCloud/FTP/LocalFilesystem` imports in tracker
+- `existing.pop("ams_mapping", None)` in checkpoint
+
+---
 
 ## Scope of this fork
-The scope of this fork was to get Openspoolman running reliable for my X1C in LAN-Mode + Dev. Mode and for local usage.
-I am not interested in cloud prints.
-It wasn't working properly with my setup: In terms of filament usage and print history was not properly filled (duplicate prints):
-- I faced some issue with assigning PETG-CF and ASA-CF. (Fixed)
-- I didn't understand the mechanics of bambu_qtt.py (Done)
-- I want to extend some api commands for pushing tags automatically via ESP32 and mini-nfc modules in the ams/external spool. (Done)
 
+Reliable filament tracking on a **Bambu Lab X1C in LAN-only / Developer Mode**. Cloud prints are not a priority. The focus is:
 
-### News
+- Correct spool-to-print-job assignment across all job initiation modes
+- Accurate per-layer filament consumption tracking
+- Robust handling of multi-plate jobs
+- No dependency on Bambu cloud services
+
+---
+
+## News (upstream)
+
 - [v0.3.0](https://github.com/drndos/openspoolman/releases/tag/v0.3.0) - 23.12.2025 — more accurate filament accounting and layer tracking, higher-fidelity print history, and better Bambu Lab / AMS integration
 - [v0.2.0](https://github.com/drndos/openspoolman/releases/tag/v0.2.0) - 07.12.2025 — Adds material-aware tray/spool mismatch detection, tray color cues, print reassign/pagination, spool material filters, and SpoolMan URL handling with refreshed responsive layouts.
 - [v0.1.9](https://github.com/drndos/openspoolman/releases/tag/v0.1.9) - 25.05.2025 — Ships post-print spool assignment, multi-platform Docker images, customizable spool sorting, timezone config, and compatibility/uI polish.
-- [v0.1.8](https://github.com/drndos/openspoolman/releases/tag/v0.1.8) - 20.04.2025 — Starts importing each filament’s SpoolMan `filament_id` for accurate matching (requires the `filament_id` custom field).
+- [v0.1.8](https://github.com/drndos/openspoolman/releases/tag/v0.1.8) - 20.04.2025 — Starts importing each filament's SpoolMan `filament_id` for accurate matching (requires the `filament_id` custom field).
 - [v0.1.7](https://github.com/drndos/openspoolman/releases/tag/v0.1.7) - 17.04.2025 — Introduces print cost tracking, printer header info, SPA gating improvements, and fixes for drawer colors/local prints.
 - [0.1.6](https://github.com/drndos/openspoolman/releases/tag/0.1.6) - 09.04.2025 — Published container images (main service + Helm chart) and packaged artifacts for easier deployments.
 
-### Main features
+---
+
+## Main features
 
 #### Dashboard overview
 *Overview over the trays and the assigned spools and spool information*
@@ -96,27 +174,27 @@ It wasn't working properly with my setup: In terms of filament usage and print h
 
 </details>
 
-### What you need:
- - Android Phone with Chrome web browser or iPhone (manual process much more complicated if using NFC Tags)
- - Server to run OpenSpoolMan with https (optional when not using NFC Tags) that is reachable from your Phone and can reach both SpoolMan and Bambu Lab printer on the network
- - Active Bambu Lab Account or PRINTER_ID and PRINTER_CODE on your printer
- - Bambu Lab printer https://eu.store.bambulab.com/collections/3d-printer
- - SpoolMan installed https://github.com/Donkie/Spoolman
- - NFC Tags (optional) https://eu.store.bambulab.com/en-sk/collections/nfc/products/nfc-tag-with-adhesive https://www.aliexpress.com/item/1005006332360160.html
+---
 
-### SpoolMan stickers
-SpoolMan can print QR-code stickers for every spool; follow the SpoolMan label guide (https://github.com/Donkie/Spoolman/wiki/Printing-Labels) to generate them. Before printing, update the base URL in SpoolMan’s settings to point at OpenSpoolMan so every sticker redirects to OpenSpoolMan instead of SpoolMan.
+## What you need
 
-### How to setup:
+- Android Phone with Chrome web browser or iPhone (manual process much more complicated if using NFC Tags)
+- Server to run OpenSpoolMan with https (optional when not using NFC Tags) that is reachable from your Phone and can reach both SpoolMan and Bambu Lab printer on the network
+- Bambu Lab printer in **LAN-only / Developer Mode** — https://eu.store.bambulab.com/collections/3d-printer
+- SpoolMan installed — https://github.com/Donkie/Spoolman
+- NFC Tags (optional) — https://eu.store.bambulab.com/en-sk/collections/nfc/products/nfc-tag-with-adhesive
+
+---
+
+## How to setup
 
 <details>
 <summary>Python / venv deployment (see Environment configuration below)</summary>
 
-1. Clone the repository and switch to the desired branch:
+1. Clone the repository:
    ```bash
-   git clone https://github.com/drndos/openspoolman.git
+   git clone https://github.com/diegoeloren/openspoolman.git
    cd openspoolman
-   git checkout <branch>
    ```
 2. Create and activate a virtual environment, then install the dependencies:
    ```bash
@@ -138,7 +216,7 @@ SpoolMan can print QR-code stickers for every spool; follow the SpoolMan label g
 
 1. Make sure `docker` and `docker compose` are installed.
 2. Configure the environment variables (see below).
-3. Copy `docker-compose.yaml` to your deployment directory (or ensure `./docker-compose.yaml` matches your environment) and adjust any host volumes or ports as needed.
+3. Copy `docker-compose.yaml` to your deployment directory and adjust any host volumes or ports as needed.
 4. Build and start the containers:
    ```bash
    docker compose up -d
@@ -166,80 +244,87 @@ SpoolMan can print QR-code stickers for every spool; follow the SpoolMan label g
 
 </details>
 
-#### Environment configuration
-- Rename `config.env.template` to `config.env` or set environment properties and:
-  - set `OPENSPOOLMAN_BASE_URL` — the HTTPS URL where OpenSpoolMan will be available on your network (no trailing slash, required for NFC writes).
-  - set `PRINTER_ID` — find it in the printer settings under Setting → Device → Printer SN.
-   - set `PRINTER_ACCESS_CODE` — find it in Setting → LAN Only Mode → Access Code (the LAN Only Mode toggle may stay off).
-   - set `PRINTER_IP` — found in Setting → LAN Only Mode → IP Address.
-   - set `SPOOLMAN_BASE_URL` — the URL of your SpoolMan installation without trailing slash.
-  - set `AUTO_SPEND` to `True` to enable legacy slicer-estimate tracking (no live layer tracking).
-  - set `TRACK_LAYER_USAGE` to `True` to switch to per-layer tracking/consumption **while `AUTO_SPEND` is also `True`**. If `AUTO_SPEND` is `False`, all filament tracking remains disabled regardless of `TRACK_LAYER_USAGE`.
-  - set `AUTO_SPEND` to `True` if you want automatic filament usage tracking (see the AUTO SPEND notes below).
-  - set `DISABLE_MISMATCH_WARNING` to `True` to hide mismatch warnings in the UI (mismatches are still detected and logged to `logs/filament_mismatch.json`, including the detected color difference when applicable).
-  - set `CLEAR_ASSIGNMENT_WHEN_EMPTY` to `True` if you want OpenSpoolMan to clear any SpoolMan assignment and reset the AMS tray whenever the printer reports no spool in that slot.
-  - set `COLOR_DISTANCE_TOLERANCE` to an integer (default `40`) if you want to make the perceptual ΔE threshold for tray/spool color mismatch warnings stricter or more lenient; when either side (AMS tray or SpoolMan spool) lacks a color the warning is skipped and the UI shows "Color not set".
- - By default, the app reads `data/3d_printer_logs.db` for print history; override it through `OPENSPOOLMAN_PRINT_HISTORY_DB` or via the screenshot helper (which targets `data/demo.db` by default).
+### Environment configuration
 
- - Run SpoolMan.
- - Add these extra fields in SpoolMan:
-   - **Filaments**
-     - "type","Type","Choice", "AERO,CF,GF,FR,Basic,HF,Translucent,Aero,Dynamic,Galaxy,Glow,Impact,Lite,Marble,Matte,Metal,Silk,Silk+,Sparkle,Tough,Tough+,Wood,Support for ABS,Support for PA PET,Support for PLA,Support for PLA-PETG,G,W,85A,90A,95A,95A HF,for AMS"
-     - "nozzle_temperature","Nozzle Temperature","Integer Range","°C","190 - 230"
-     - "filament_id","Filament ID", "Text"
-   - **Spools**
-     - "tag","tag","Text"
-     - "active_tray","Active Tray","Text"
- - Add your Manufacturers, Filaments and Spools to SpoolMan (consider 'Import from External' for faster workflow).
- - The filament id lives in `C:\Users\USERNAME\AppData\Roaming\BambuStudio\user\USERID\filament\base` (same for each printer/nozzle).
- - Open the server base URL in your mobile browser.
- - Optionally copy Bambu Lab RFIDs into the extra tag on spools so they match automatically; read the tag id from logs or the AMS info page.
+Rename `config.env.template` to `config.env` or set environment properties:
 
-#### Filament matching rules
-- The spool's `material` must match the AMS tray's `tray_type` (main type).  
+- `OPENSPOOLMAN_BASE_URL` — the HTTPS URL where OpenSpoolMan will be available on your network (no trailing slash, required for NFC writes).
+- `PRINTER_ID` — find it in the printer settings under Setting → Device → Printer SN.
+- `PRINTER_ACCESS_CODE` — find it in Setting → LAN Only Mode → Access Code (the LAN Only Mode toggle may stay off).
+- `PRINTER_IP` — found in Setting → LAN Only Mode → IP Address.
+- `SPOOLMAN_BASE_URL` — the URL of your SpoolMan installation without trailing slash.
+- `AUTO_SPEND` — set to `True` to enable filament tracking (required for any tracking to work).
+- `TRACK_LAYER_USAGE` — set to `True` to enable per-layer tracking and consumption **while `AUTO_SPEND` is also `True`**. If `AUTO_SPEND` is `False`, all filament tracking remains disabled regardless of `TRACK_LAYER_USAGE`.
+- `DISABLE_MISMATCH_WARNING` — set to `True` to hide mismatch warnings in the UI (mismatches are still detected and logged to `logs/filament_mismatch.json`).
+- `CLEAR_ASSIGNMENT_WHEN_EMPTY` — set to `True` if you want OpenSpoolMan to clear any SpoolMan assignment and reset the AMS tray whenever the printer reports no spool in that slot.
+- `COLOR_DISTANCE_TOLERANCE` — integer (default `40`), perceptual ΔE threshold for tray/spool color mismatch warnings.
+
+By default, the app reads `data/3d_printer_logs.db` for print history; override it through `OPENSPOOLMAN_PRINT_HISTORY_DB`.
+
+### SpoolMan setup
+
+Run SpoolMan and add these extra fields:
+
+- **Filaments**
+  - `type` — Choice: `AERO,CF,GF,FR,Basic,HF,Translucent,Aero,Dynamic,Galaxy,Glow,Impact,Lite,Marble,Matte,Metal,Silk,Silk+,Sparkle,Tough,Tough+,Wood,Support for ABS,Support for PA PET,Support for PLA,Support for PLA-PETG,G,W,85A,90A,95A,95A HF,for AMS`
+  - `nozzle_temperature` — Integer Range, °C, 190–230
+  - `filament_id` — Text
+- **Spools**
+  - `tag` — Text
+  - `active_tray` — Text
+
+Add your Manufacturers, Filaments and Spools to SpoolMan (consider 'Import from External' for faster workflow).
+
+The filament id lives in `C:\Users\USERNAME\AppData\Roaming\BambuStudio\user\USERID\filament\base` (same for each printer/nozzle).
+
+### SpoolMan stickers
+
+SpoolMan can print QR-code stickers for every spool; follow the [SpoolMan label guide](https://github.com/Donkie/Spoolman/wiki/Printing-Labels) to generate them. Before printing, update the base URL in SpoolMan's settings to point at OpenSpoolMan so every sticker redirects to OpenSpoolMan instead of SpoolMan.
+
+---
+
+## Filament matching rules
+
+- The spool's `material` must match the AMS tray's `tray_type` (main type).
 - For Bambu filaments, the AMS reports a sub-brand; this must match the spool's sub-brand. You can model this either as:
   - `material` = full Bambu material (e.g., `PLA Wood`) and leave `type` empty, **or**
   - `material` = base (e.g., `PLA`) and `type` = the add-on (e.g., `Wood`).
-  Both must correspond to what the AMS reports for that tray.
 - You can wrap optional notes in parentheses inside `material` (e.g., `PLA CF (recycled)`); anything in parentheses is ignored during matching.
-- If matching still fails, please file a report using `.github/ISSUE_TEMPLATE/filament-mismatch.md` or temporarily hide the UI warning via `DISABLE_MISMATCH_WARNING=true` (mismatches are still logged to `logs/filament_mismatch.json`, and color mismatches also capture the computed color distance).
+- If matching still fails, temporarily hide the UI warning via `DISABLE_MISMATCH_WARNING=true` (mismatches are still logged to `logs/filament_mismatch.json`).
 
-With NFC Tags:
- - For non-Bambu filament, select it in SpoolMan, click 'Write,' and tap an NFC tag near your phone (allow NFC).
- - Attach the NFC tag to the filament.
- - Load the filament into AMS, then bring the phone near the NFC tag so it opens OpenSpoolMan.
- - Assign the AMS slot you used in the UI.
+---
 
-Without NFC Tags:
- - Click 'Fill' on a tray and select the desired spool.
- - Done.
+## With NFC Tags
 
-### Accessing OpenSpoolMan
-Once the server is running (via `wsgi.py`, Gunicorn, Docker, or Helm), open `https://<host>:8443` if you used the built-in adhoc SSL mode, or `http://<host>:8001` when the service listens on the default port 8001. Replace `<host>` with your server's IP/DNS and ensure the port matches your chosen deployment (`PORT` env var or docker-compose mapping). For Docker deployments, you can also use `docker compose port openspoolman 8001` to see the mapped host port.
-### AUTO SPEND - Automatic filament usage based on slicer estimate
-You can turn this feature on to automatically update the spool usage in SpoolMan. 
-This feature is using slicer information about predicted filament weight usage (and in future correlating it with the progress of the printer to compute the estimate of filament used).
+- For non-Bambu filament, select it in SpoolMan, click 'Write,' and tap an NFC tag near your phone (allow NFC).
+- Attach the NFC tag to the filament.
+- Load the filament into AMS, then bring the phone near the NFC tag so it opens OpenSpoolMan.
+- Assign the AMS slot you used in the UI.
 
-This feature has currently following issues/drawbacks:
- - Spending on the start of the print
- - Not spending according to print process and spending full filament weight even if print fails
- - Don't know if it works with LAN mode, since it downloads the 3MF file from cloud
- - Not tested with multiple AMS systems
- - Not handling the mismatch between the SpoolMan and AMS (if you don't have the Active Tray information correct in spoolman it won't work properly)
+## Without NFC Tags
 
-### Notes:
- - If you change the BASE_URL of this app, you will need to reconfigure all NFC TAGS
+- Click 'Fill' on a tray and select the desired spool.
+- Done.
 
-### TBD:
- - Filament remaining in AMS (I have only AMS lite, if you have AMS we can test together)
- - Filament spending based on printing
-   - TODO: handle situation when the print doesn't finish
-   - TODO: test with multiple AMS
- - Code cleanup
- - Video showcase
- - Docker compose SSL
- - TODOs
- - Reduce the amount of files in docker container
- - Cloud service for controlled redirect so you don't have to reconfigure NFC tags
- - QR codes
- - Add search to list of spools
+---
+
+## Accessing OpenSpoolMan
+
+Once the server is running, open `https://<host>:8443` if you used the built-in adhoc SSL mode, or `http://<host>:8001` when the service listens on the default port 8001. For Docker deployments, you can also use `docker compose port openspoolman 8001` to see the mapped host port.
+
+---
+
+## Notes
+
+- If you change the `OPENSPOOLMAN_BASE_URL`, you will need to reconfigure all NFC tags.
+- Cloud prints are not tested or supported in this fork.
+
+---
+
+## TBD / Known gaps
+
+- Filament remaining in AMS (AMS Lite only — no full AMS tested yet)
+- Checkpoint resume: spool→tray bindings are re-learned live after restart; usage between crash and first SETTLED event is buffered and applied once the tray is confirmed
+- Multi-AMS setups: architecture supports it (tray IDs 0–3 = AMS 1, 4–7 = AMS 2), but not yet tested
+- LOCAL jobs from printer internal storage (`file:///userdata/` paths other than `project_file.gcode`) — MQTT recordings needed to extend detection
+- Video showcase
