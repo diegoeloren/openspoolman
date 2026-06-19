@@ -109,6 +109,7 @@ class LiveTrayResolver:
         self._gcode_filament_sequence: list[int] = []
         self._active = False
         self._on_settled_callback = None  # callable(filament_index, tray_id) | None
+        self._pending_star: int | None = None  # last known star during swap
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -138,6 +139,7 @@ class LiveTrayResolver:
         self._swap_count = 0
         self._gcode_filament_sequence = list(gcode_filament_sequence or [])
         self._on_settled_callback = on_settled
+        self._pending_star = None
         self._active = True
         log("[LiveTrayResolver] started, gcode_sequence="
             f"{self._gcode_filament_sequence}")
@@ -204,21 +206,37 @@ class LiveTrayResolver:
         star: int | None,
     ) -> None:
 
-        # ── Detect swap announcement: star changes while AMS is stable ──────
-        # This is the earliest signal, appears before ams_status changes.
+        # ── Detect swap announcement: star changes ──────────────────────────
+        # star is the extruder target slot. It changes before ams_status.
+        # Important: star can change MULTIPLE times during one swap sequence
+        # (e.g. purge move back to old tray, then actual move to new tray).
+        # We always track the LATEST star value — the one present at SETTLED
+        # is the authoritative target tray.
         if (
-            _ams_is_stable(self._prev_ams_status)
-            and star is not None
-            and star != _AMS_TRAY_SENTINEL  # 255 = no target / unloaded
+            star is not None
+            and star != _AMS_TRAY_SENTINEL  # 255 = no target
             and star != self._prev_star
             and self._prev_star is not None
         ):
-            pending = self._next_pending_filament_index()
-            if pending is not None:
-                log(f"[LiveTrayResolver] swap announced: "
-                    f"star {self._prev_star}→{star}, "
-                    f"pending filament_index={pending}")
-                self._pending_filament_index = pending
+            is_first_announcement = (
+                _ams_is_stable(self._prev_ams_status)
+                and self._pending_filament_index is None
+            )
+            if is_first_announcement:
+                # First star change from stable state: new swap starting.
+                pending = self._next_pending_filament_index()
+                if pending is not None:
+                    log(f"[LiveTrayResolver] swap announced: "
+                        f"star {self._prev_star}→{star}, "
+                        f"pending filament_index={pending}")
+                    self._pending_filament_index = pending
+            else:
+                # Star changed again mid-swap (purge move or re-route).
+                # Update _pending_star so SETTLED uses the final tray.
+                log(f"[LiveTrayResolver] star updated mid-swap: "
+                    f"{self._prev_star}→{star} "
+                    f"(pending filament_index={self._pending_filament_index})")
+        self._pending_star = star if (star is not None and star != _AMS_TRAY_SENTINEL) else self._pending_star
 
         # ── Detect SETTLED: ams_status stable AND tray_pre == tray_now ──────
         if (
@@ -242,7 +260,9 @@ class LiveTrayResolver:
             This happens exactly once per print.
 
           _pending_filament_index is not None:
-            A swap was announced (star changed) — bind that index.
+            A swap was announced — validate tray_now against _pending_star.
+            If they differ, the swap isn't complete yet (purge detour) —
+            wait for the next SETTLED.
 
           All other SETTLED events (no announcement, not startup):
             Ignore. These occur during leveling, purging, and other
@@ -250,19 +270,28 @@ class LiveTrayResolver:
         """
         if self._pending_filament_index is None:
             if self._swap_count > 0:
-                # Not a real swap — leveling/purge/other routine.
                 log(f"[LiveTrayResolver] SETTLED tray={tray_now} ignored "
                     "(no swap announced, not startup)")
                 return
-            # swap_count == 0: first startup load — bind first GCode filament.
+            # swap_count == 0: first startup load.
             filament_index = self._next_pending_filament_index()
             if filament_index is None:
                 log(f"[LiveTrayResolver] SETTLED tray={tray_now} "
                     "but no pending filament index (sequence exhausted?)")
                 return
         else:
+            # Validate: tray_now must match the final star target.
+            # If not, this is an intermediate SETTLED (e.g. purge on old tray).
+            if (
+                self._pending_star is not None
+                and tray_now != self._pending_star
+            ):
+                log(f"[LiveTrayResolver] SETTLED tray={tray_now} skipped: "
+                    f"waiting for star target tray={self._pending_star}")
+                return
             filament_index = self._pending_filament_index
             self._pending_filament_index = None
+            self._pending_star = None
 
         self._swap_count += 1
         old = self._index_to_tray.get(filament_index)
@@ -285,17 +314,26 @@ class LiveTrayResolver:
 
     def _next_pending_filament_index(self) -> int | None:
         """
-        Returns the next unbound filament index from the GCode sequence,
-        or None if the sequence is exhausted or unavailable.
-        """
-        for idx in self._gcode_filament_sequence:
-            if idx not in self._index_to_tray:
-                return idx
+        Returns the next filament index from the GCode swap sequence
+        by position (swap_count), supporting repetitions.
 
-        # Sequence exhausted or not provided — fall back to lowest unbound
-        # integer that could logically follow (best-effort).
+        Example sequence [0, 1, 0, 2]:
+          swap_count=0 -> 0  (first filament, startup)
+          swap_count=1 -> 1  (first swap)
+          swap_count=2 -> 0  (back to 0 — repetition!)
+          swap_count=3 -> 2  (final filament)
+        """
+        if self._gcode_filament_sequence:
+            if self._swap_count < len(self._gcode_filament_sequence):
+                return self._gcode_filament_sequence[self._swap_count]
+            log("[LiveTrayResolver] swap sequence exhausted "
+                f"(swap_count={self._swap_count}, "
+                f"sequence_len={len(self._gcode_filament_sequence)})")
+            return None
+
+        # No sequence provided — fall back to lowest unbound index.
         bound = set(self._index_to_tray.keys())
-        for candidate in range(16):   # max 16 AMS slots ever
+        for candidate in range(16):
             if candidate not in bound:
                 return candidate
         return None

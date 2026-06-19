@@ -165,6 +165,7 @@ def evaluate_gcode(gcode: str) -> dict:
   current_extrusion = {}
   active_filament = None
   layer_filaments = {}
+  filament_swap_sequence: list[int] = []  # full swap order WITH repetitions
 
   for operation in operations:
     if operation.operation == "M73":
@@ -183,8 +184,11 @@ def evaluate_gcode(gcode: str) -> dict:
           log("[filament-tracker] Full unload (S255)")
           active_filament = None
           continue
-        log(f"[filament-tracker] Filament change: {active_filament} -> {filament[:-1]}")
-        active_filament = int(filament[:-1])
+        new_filament = int(filament[:-1])
+        log(f"[filament-tracker] Filament change: {active_filament} -> {new_filament}")
+        if new_filament != active_filament:
+          filament_swap_sequence.append(new_filament)
+        active_filament = new_filament
 
     if operation.operation in ("G0", "G1", "G2", "G3"):
       extrusion = operation.params.get("E")
@@ -198,7 +202,7 @@ def evaluate_gcode(gcode: str) -> dict:
 
   if current_extrusion:
     layer_filaments[current_layer] = current_extrusion.copy()
-  return layer_filaments
+  return layer_filaments, filament_swap_sequence
 
 
 def extract_gcode_from_3mf(path: str, gcode_path: str | None) -> str | None:
@@ -224,6 +228,7 @@ def extract_gcode_from_3mf(path: str, gcode_path: str | None) -> str | None:
 class FilamentUsageTracker:
   def __init__(self):
     self.active_model = None
+    self._gcode_swap_sequence: list[int] = []
     self._resolver = LiveTrayResolver()
     self.spent_layers = set()
     self.gcode_state = None
@@ -575,6 +580,7 @@ class FilamentUsageTracker:
 
     self._resolver.stop_print()
     self.active_model = None
+    self._gcode_swap_sequence = []
     self.current_layer = None
     self.print_metadata = None
     self.print_id = None
@@ -599,6 +605,7 @@ class FilamentUsageTracker:
 
     self._resolver.stop_print()
     self.active_model = None
+    self._gcode_swap_sequence = []
     self.current_layer = None
     self.print_metadata = None
     self.print_id = None
@@ -810,30 +817,44 @@ class FilamentUsageTracker:
     """
     Callback from LiveTrayResolver: called immediately when a
     filament_index -> tray_id binding is confirmed (SETTLED).
-    Flushes any pending usage for this filament right away.
+
+    1. Binds the spool in the DB right away (so UI shows spool name
+       even before the first layer is committed).
+    2. Flushes any pending usage accumulated before the binding.
     """
-    log(f"[filament-tracker] tray settled: filament {filament_index} -> tray {tray_id}, flushing pending usage")
+    log(f"[filament-tracker] tray settled: filament {filament_index} -> tray {tray_id}")
+
+    # ── 1. Spool binding in DB ───────────────────────────────────────
+    if self.print_id:
+      spool_id = self._get_spool_id_for_filament(filament_index)
+      if spool_id is not None:
+        filament_id = self._resolve_filament_id(filament_index)
+        if filament_id is not None:
+          update_filament_spool(self.print_id, filament_id, spool_id)
+          log(f"[filament-tracker] spool bound: filament_id={filament_id} -> spool_id={spool_id}")
+        self._filament_spool_id_map[filament_index] = spool_id
+        if spool_id not in self._spool_data_cache:
+          spool_data = self._get_spool_data(spool_id)
+          if spool_data is not None:
+            self._spool_data_cache[spool_id] = spool_data
+      else:
+        log(f"[filament-tracker] no spool found for filament {filament_index} tray {tray_id}")
+
+    # ── 2. Flush pending usage ───────────────────────────────────────
     self._apply_usage_for_filament(filament_index, 0.0)
     self._maybe_update_predicted_total()
     self._update_layer_tracking_progress()
 
   def _extract_gcode_filament_sequence(self) -> list[int]:
     """
-    Returns the ordered list of filament indices as they appear in the
-    GCode (order of first M620 use per filament).  Used by LiveTrayResolver
-    to know which filament_index to bind at each SETTLED event.
+    Returns the FULL swap sequence from the GCode WITH repetitions.
+    Example: filament 0, then 1, then back to 0, then 2 -> [0, 1, 0, 2]
+
+    This is critical for the LiveTrayResolver: it needs to know that
+    a SETTLED event after binding filament 1 should bind filament 0 again
+    (not filament 2), because the GCode repeats filament 0.
     """
-    if not self.active_model:
-      return []
-    seen: list[int] = []
-    seen_set: set[int] = set()
-    # active_model keys are layers; values are {filament_index: mm}
-    for layer in sorted(self.active_model.keys()):
-      for fi in self.active_model[layer]:
-        if fi not in seen_set:
-          seen.append(fi)
-          seen_set.add(fi)
-    return seen
+    return list(self._gcode_swap_sequence)
 
   def _bind_initial_spools(self) -> None:
     if not self.print_id:
@@ -983,7 +1004,7 @@ class FilamentUsageTracker:
     if gcode is None:
       log("Failed to extract gcode from model")
       return
-    self.active_model = evaluate_gcode(gcode)
+    self.active_model, self._gcode_swap_sequence = evaluate_gcode(gcode)
 
   def _attempt_print_resume(self, task_id, subtask_id) -> bool:
 
