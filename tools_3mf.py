@@ -336,6 +336,7 @@ def getMetaDataFrom3mf(
   url,
   keep_downloaded_file: bool = False,
   downloaded_file_path: str | None = None,
+  plate_idx: int | None = None,
 ):
   """
   Download a 3MF file from a URL, unzip it, and parse filament usage.
@@ -437,6 +438,23 @@ def getMetaDataFrom3mf(
             filaments= {}
             filament_id_order = []
             for plate in root.findall(".//plate"):
+              # Read this plate's index from its metadata
+              plate_index_meta = plate.find("metadata[@key='index']")
+              this_plate_idx = None
+              if plate_index_meta is not None:
+                try:
+                  this_plate_idx = int(plate_index_meta.attrib.get("value", 0))
+                except (TypeError, ValueError):
+                  pass
+
+              # If a specific plate was requested, skip all others
+              if plate_idx is not None and this_plate_idx != plate_idx:
+                continue
+
+              # This is the plate we want — record its ID
+              if this_plate_idx is not None:
+                metadata["plateID"] = str(this_plate_idx)
+
               for filament in plate.findall(".//filament"):
                 used_g = filament.attrib.get("used_g")
                 filament_raw = filament.attrib.get("id")
@@ -463,6 +481,15 @@ def getMetaDataFrom3mf(
             metadata["usage"] = usage
             metadata["filament_id_order"] = filament_id_order
             metadata["filament_id_to_index"] = {fid: idx for idx, fid in enumerate(filament_id_order)}
+
+            if "plateID" not in metadata:
+              log(f"[tools_3mf] No matching plate for plate_idx={plate_idx}, falling back to first plate")
+              first_plate = root.find(".//plate")
+              if first_plate is not None:
+                first_meta = first_plate.find("metadata[@key='index']")
+                metadata["plateID"] = first_meta.attrib.get("value", "1") if first_meta is not None else "1"
+              else:
+                metadata["plateID"] = "1"
         else:
           log(f"File '{slice_info_path}' not found in the archive.")
           return {}

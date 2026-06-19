@@ -1,5 +1,5 @@
 from logger import log
-from print_history import insert_print, insert_filament_usage
+from print_history import insert_print
 from print_context import (
     PrintContext,
     STATE_IDLE,
@@ -7,9 +7,6 @@ from print_context import (
     STATE_FINAL,
 )
 
-from config import (
-    TRACK_LAYER_USAGE,
-)
 
 from filament_usage_tracker import FilamentUsageTracker
 
@@ -198,8 +195,6 @@ class PrintMonitor:
             image,
         )
 
-        self.apply_filaments(ctx, new_print_id)
-
         ctx.set_tracking(new_print_id)
 
     def on_print_started(self, ctx: PrintContext):
@@ -213,6 +208,7 @@ class PrintMonitor:
             gcode_file_name=meta.get("gcode_path"),
             task_id=ctx.get_task_id(),
             subtask_id=ctx.get_subtask_id(),
+            filaments=meta.get("filaments") or {},
         )
 
         if not started:
@@ -237,44 +233,3 @@ class PrintMonitor:
     def on_print_done(self, ctx: PrintContext):
         log(f"[PMS EVENT] print finished: {ctx.job_label}")
         ctx.reset()
-
-    # --------------------------------------------------------
-    # FILAMENT DB INSERT
-    # --------------------------------------------------------
-    def apply_filaments(self, ctx, print_id):
-
-        filaments = ctx.get_metadata().get("filaments", {}).items()
-
-        for fid, filament in filaments:
-
-            parsed_grams = self._parse_floats(filament.get("used_g"))
-            parsed_length_m = self._parse_floats(filament.get("used_m"))
-
-            length_mm = parsed_length_m * 1000 if parsed_length_m else 0.0
-            grams = parsed_grams or 0.0
-
-            if TRACK_LAYER_USAGE:
-                grams = 0.0
-                length_mm = 0.0
-
-            insert_filament_usage(
-                print_id,
-                filament["type"],
-                filament["color"],
-                grams,
-                fid,
-                estimated_grams=parsed_grams,
-                length_used=length_mm,
-                estimated_length=parsed_length_m * 1000 if parsed_length_m else None,
-            )
-
-            log(
-                f"[Print-Context] filament id={fid} "
-                f"linked to print_id={print_id}"
-            )
-
-    def _parse_floats(self, value):
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None

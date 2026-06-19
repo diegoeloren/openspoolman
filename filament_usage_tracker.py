@@ -1,20 +1,17 @@
 import json
 import math
 import os
-import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import timedelta
 from aux_fx import now
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 from config import EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID, TRACK_LAYER_USAGE, PRINTER_ID
 from spoolman_client import consumeSpool
 from spoolman_service import fetchSpools, parse_ams_mapping_value, trayUid
-from tools_3mf import download3mfFromCloud, download3mfFromFTP, download3mfFromLocalFilesystem
-from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking
+from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking, insert_filament_usage
 from logger import log
 from live_tray_resolver import LiveTrayResolver
 from aux_fx import (
@@ -67,7 +64,7 @@ def _save_checkpoint_metadata(metadata: dict) -> None:
   _checkpoint_metadata_path().write_text(json.dumps(metadata))
 
 
-def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id, gcode_file_name: str, gcode_filament_sequence: list | None = None) -> None:
+def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id, gcode_file_name: str, gcode_filament_sequence: list | None = None, print_id: int | None = None) -> None:
   dest = _checkpoint_dir() / "model.3mf"
   dest.write_bytes(Path(model_path).read_bytes())
 
@@ -77,7 +74,7 @@ def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id,
   existing["current_layer"] = current_layer
   existing["gcode_filament_sequence"] = gcode_filament_sequence or []
   existing["gcode_file_name"] = gcode_file_name
-  existing.pop("ams_mapping", None)
+  existing["print_id"] = print_id
   _save_checkpoint_metadata(existing)
 
 
@@ -117,11 +114,12 @@ def recover_model(task_id, subtask_id):
   current_layer = metadata.get("current_layer")
   gcode_file_name = metadata.get("gcode_file_name")
   gcode_filament_sequence = metadata.get("gcode_filament_sequence") or []
+  print_id = metadata.get("print_id")
 
   if current_layer is None or gcode_file_name is None:
     return None
 
-  return str(model_path), gcode_file_name, current_layer, gcode_filament_sequence
+  return str(model_path), gcode_file_name, current_layer, gcode_filament_sequence, print_id
 
 
 class GCodeOperation:
@@ -277,11 +275,16 @@ class FilamentUsageTracker:
       gcode_file_name: str | None,
       task_id,
       subtask_id,
+      filaments: dict | None = None,
   ) -> bool:
       """
       Start a new tracked print.
 
-      Called exactly once by PrintMonitor during PMS_PREPARE.
+      Called exactly once by PrintMonitor during PMS_PREPARE → PMS_TRACKING.
+
+      filaments: plate-filtered filament dict from metadata (key=filament_id).
+      If provided, inserts filament_usage rows into the DB here instead of
+      in PrintMonitor.apply_filaments().
       """
 
       log("[filament-tracker] start_print()")
@@ -339,6 +342,9 @@ class FilamentUsageTracker:
       # DB INIT
       # ------------------------------------------------------
 
+      if self.print_id and filaments:
+          self._apply_filaments(filaments)
+
       if self.print_id:
           payload = {
               "status": LAYER_TRACKING_STATUS_RUNNING,
@@ -371,6 +377,7 @@ class FilamentUsageTracker:
           subtask_id=subtask_id,
           gcode_file_name=gcode_file_name,
           gcode_filament_sequence=self._extract_gcode_filament_sequence(),
+          print_id=self.print_id,
       )
 
       log("[filament-tracker] Print initialized")
@@ -510,33 +517,6 @@ class FilamentUsageTracker:
               task_id,
               subtask_id,
           )
-
-  def apply_ams_mapping(self, ams_mapping: list[int] | None) -> None:
-    """Deprecated: AMS mapping is now resolved live via LiveTrayResolver."""
-    log("[filament-tracker] apply_ams_mapping() called but is now a no-op "
-        "(live resolver handles mapping automatically)")
-
-  def _retrieve_model(self, model_url: str | None) -> str | None:
-    if not model_url:
-      log("[filament-tracker] No model URL provided")
-      return None
-
-    uri = urlparse(model_url)
-    try:
-      with tempfile.NamedTemporaryFile(suffix=".3mf", delete=False) as model_file:
-        if uri.scheme in ("https", "http"):
-          log(f"[filament-tracker] Downloading model via HTTP(S): {model_url}")
-          download3mfFromCloud(model_url, model_file)
-        elif uri.scheme == "local":
-          log(f"[filament-tracker] Loading model from local path: {uri.path}")
-          download3mfFromLocalFilesystem(uri.path, model_file)
-        else:
-          log(f"[filament-tracker] Downloading model via FTP: {model_url}")
-          download3mfFromFTP(model_url.rpartition('/')[-1], model_file) # Pull just filename to clear out any unexpected paths
-        return model_file.name
-    except Exception as exc:
-      log(f"Failed to fetch model: {exc}")
-      return None
 
   def _handle_layer_change(self, new_layer: int) -> None:
     if self.active_model is None:
@@ -813,6 +793,40 @@ class FilamentUsageTracker:
     if self.print_id:
       update_layer_tracking(self.print_id, filament_grams_total=round(total_grams, 2))
 
+  def _apply_filaments(self, filaments: dict) -> None:
+    """
+    Insert filament_usage rows for the current print.
+
+    filaments: plate-filtered dict from metadata, keyed by filament_id (int).
+    Called once at print start. On checkpoint resume, rows already exist in
+    the DB so this method is NOT called again.
+    """
+    for fid, filament in filaments.items():
+      try:
+        parsed_grams = float(filament.get("used_g") or 0)
+      except (TypeError, ValueError):
+        parsed_grams = 0.0
+      try:
+        parsed_length_m = float(filament.get("used_m") or 0)
+      except (TypeError, ValueError):
+        parsed_length_m = 0.0
+
+      length_mm = parsed_length_m * 1000
+      grams = 0.0 if TRACK_LAYER_USAGE else parsed_grams
+      length_used = 0.0 if TRACK_LAYER_USAGE else length_mm
+
+      insert_filament_usage(
+          self.print_id,
+          filament.get("type"),
+          filament.get("color"),
+          grams,
+          fid,
+          estimated_grams=parsed_grams,
+          length_used=length_used,
+          estimated_length=length_mm if length_mm else None,
+      )
+      log(f"[filament-tracker] filament id={fid} linked to print_id={self.print_id}")
+
   def _on_tray_settled(self, filament_index: int, tray_id: int) -> None:
     """
     Callback from LiveTrayResolver: called immediately when a
@@ -1026,7 +1040,13 @@ class FilamentUsageTracker:
         gcode_file_name,
         current_layer,
         gcode_filament_sequence,
+        print_id,
     ) = result
+
+    # Restore print_id so all subsequent DB writes land on the right row
+    if print_id is not None:
+        self.print_id = print_id
+        log(f"[filament-tracker] Restored print_id={print_id} from checkpoint")
 
     # ------------------------------------------------------
     # LOAD MODEL

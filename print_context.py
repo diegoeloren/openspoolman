@@ -338,12 +338,9 @@ class PrintContext:
         return self.source_type
 
     def get_metadata(self) -> dict:
-        """
-        Returns the metadata which are required for the filamenttracker.
-        It is set manually.
-        """
+        if self.metadata is None:
+            self.metadata = {}
         self.metadata["print_id"] = self.get_printid()
-        self.metadata["use_ams"] = self.get_ams_usage()
         self.metadata["print_type"] = self.get_source_type
         self.metadata["task_id"] = self.summary.get("task_id")
         self.metadata["subtask_id"] = self.summary.get("subtask_id")
@@ -355,23 +352,11 @@ class PrintContext:
     def get_summary(self) -> dict:
         return self.summary
 
-    def get_ams_usage(self) -> bool:
-        use_ams_raw = self.summary.get("use_ams")
-        use_ams = None
-        if use_ams_raw is None:
-            use_ams = (self.get_source_type() in (JOB_TYPE_LAN, JOB_TYPE_CLOUD))
-        elif isinstance(use_ams_raw, str):
-            use_ams = use_ams_raw.strip().lower() in ("1", "true", "yes", "on")
-        else:
-            use_ams = bool(use_ams_raw)
-        return use_ams
-
     def info(self) -> str:
         """
         Concatenates all basic attributes to one string
         """
-        use_ams_raw = self.summary.get("use_ams")
-        sum = f"timestamp: {self.timestamp} | printer_id: {self.printer_id} | printer_state: {self.printer_state} | source_type: {self.source_type} | job_label: {self.job_label} | task: {self.task} | print_id: {self.print_id} | tracking_started: {self.tracking_started} | download_done: {self.download_done} | using_ams(fx): {self.get_ams_usage()} | use_ams_raw: {use_ams_raw}"
+        sum = f"timestamp: {self.timestamp} | printer_id: {self.printer_id} | printer_state: {self.printer_state} | source_type: {self.source_type} | job_label: {self.job_label} | task: {self.task} | print_id: {self.print_id} | tracking_started: {self.tracking_started} | download_done: {self.download_done}"
         return sum
 
     def is_downloaded(self):
@@ -393,15 +378,25 @@ class PrintContext:
             self.download_done = False
             return
 
-        # ── LOCAL job: cannot fetch the URL, use cached 3MF instead ────────
-        if self.source_type == JOB_TYPE_LOCAL:
+        plate_idx = self.summary.get("plate_idx")
+        try:
+            plate_idx = int(plate_idx) if plate_idx is not None else None
+        except (TypeError, ValueError):
+            plate_idx = None
+
+        # ── LOCAL "Erneut drucken": generic placeholder URL, use cached 3MF ──
+        # file:///userdata/project_file.gcode.3mf is not a real filename and
+        # cannot be fetched via FTP. Fall back to the cached 3MF from the last
+        # LAN/CLOUD print of the same file.
+        if self.source_type == JOB_TYPE_LOCAL and "project_file.gcode" in source:
             if MODEL_CACHE_PATH.exists():
-                log(f"[DEBUG] LOCAL job: using cached 3MF at {MODEL_CACHE_PATH}")
+                log(f"[DEBUG] LOCAL repeat-print: using cached 3MF at {MODEL_CACHE_PATH} (plate_idx={plate_idx})")
                 try:
                     cached_metadata = getMetaDataFrom3mf(
                         f"local:{MODEL_CACHE_PATH}",
                         keep_downloaded_file=True,
                         downloaded_file_path=str(MODEL_CACHE_PATH),
+                        plate_idx=plate_idx,
                     )
                     if cached_metadata:
                         # Ensure downloaded_model_path is always set,
@@ -409,17 +404,17 @@ class PrintContext:
                         cached_metadata["downloaded_model_path"] = str(MODEL_CACHE_PATH)
                         self.metadata = cached_metadata
                         self.download_done = True
-                        log(f"[DEBUG] LOCAL job: cache parsed successfully")
+                        log(f"[DEBUG] LOCAL repeat-print: cache parsed successfully")
                     else:
-                        log(f"[WARNING] LOCAL job: cache parse returned empty, cannot track.")
+                        log(f"[WARNING] LOCAL repeat-print: cache parse returned empty, cannot track.")
                         self.metadata = None
                         self.download_done = False
                 except Exception as exc:
-                    log(f"[WARNING] LOCAL job: cache parse failed: {exc}")
+                    log(f"[WARNING] LOCAL repeat-print: cache parse failed: {exc}")
                     self.metadata = None
                     self.download_done = False
             else:
-                log(f"[WARNING] LOCAL job: no cached 3MF at {MODEL_CACHE_PATH}, cannot track.")
+                log(f"[WARNING] LOCAL repeat-print: no cached 3MF at {MODEL_CACHE_PATH}, cannot track.")
                 self.metadata = None
                 self.download_done = False
             return
@@ -430,6 +425,7 @@ class PrintContext:
                 source,
                 keep_downloaded_file=TRACK_LAYER_USAGE,
                 downloaded_file_path=str(MODEL_CACHE_PATH) if TRACK_LAYER_USAGE else None,
+                plate_idx=plate_idx,
             )
             if self.metadata:
                 log(f"[DEBUG] Metadata downloaded for project-file from {source}")
@@ -451,6 +447,4 @@ class PrintContext:
             self.download_done = False
             return
 
-    def get_mapping(self):
-        return self.summary.get("ams_mapping") or []
-        
+

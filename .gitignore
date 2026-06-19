@@ -145,3 +145,4 @@ static/prints/
 data/
 logs/*.log
 logs/*.json
+.vscode/launch.json2
