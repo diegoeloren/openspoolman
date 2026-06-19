@@ -533,6 +533,23 @@ def getMetaDataFrom3mf(
                 metadata["tool_index_to_filament_id"] = tool_to_filament
                 metadata["filament_id_to_tool_index"] = filament_to_tool
 
+        # Read filament_sequence.json for the swap sequence per plate.
+        # This gives filament IDs in swap order (e.g. [2, 3, 2, 3, 2]),
+        # which is more reliable than parsing M620 slot indices from GCode.
+        seq_path = "Metadata/filament_sequence.json"
+        if seq_path in z.namelist():
+          try:
+            import json as _json
+            seq_data = _json.loads(z.read(seq_path))
+            plate_key = f"plate_{metadata['plateID']}"
+            plate_seq = seq_data.get(plate_key, {})
+            raw_sequence = plate_seq.get("sequence") or []
+            if raw_sequence:
+              metadata["filament_id_sequence"] = [int(x) for x in raw_sequence]
+              log(f"[tools_3mf] plate {metadata['plateID']} filament_id_sequence={metadata['filament_id_sequence']}")
+          except Exception as exc:
+            log(f"[tools_3mf] Could not parse filament_sequence.json: {exc}")
+
         if keep_downloaded_file:
           if downloaded_file_path:
             target_path = os.path.abspath(downloaded_file_path)

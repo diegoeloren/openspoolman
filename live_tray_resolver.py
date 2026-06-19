@@ -274,6 +274,17 @@ class LiveTrayResolver:
                     "(no swap announced, not startup)")
                 return
             # swap_count == 0: first startup load.
+            # Only bind if star confirms this tray is the intended start tray.
+            # If star already points to a different tray, the printer is about
+            # to swap immediately (e.g. Plate 2 starts with a different filament
+            # than what's currently loaded). Wait for that swap's SETTLED.
+            if (
+                self._pending_star is not None
+                and self._pending_star != tray_now
+            ):
+                log(f"[LiveTrayResolver] SETTLED tray={tray_now} skipped at startup: "
+                    f"star already points to tray={self._pending_star}, swap incoming")
+                return
             filament_index = self._next_pending_filament_index()
             if filament_index is None:
                 log(f"[LiveTrayResolver] SETTLED tray={tray_now} "

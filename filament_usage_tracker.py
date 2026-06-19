@@ -1,16 +1,19 @@
 import json
 import math
 import os
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import timedelta
 from aux_fx import now
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from config import EXTERNAL_SPOOL_AMS_ID, EXTERNAL_SPOOL_ID, TRACK_LAYER_USAGE, PRINTER_ID
 from spoolman_client import consumeSpool
 from spoolman_service import fetchSpools, parse_ams_mapping_value, trayUid
+from tools_3mf import download3mfFromCloud, download3mfFromFTP, download3mfFromLocalFilesystem
 from print_history import update_filament_spool, update_filament_grams_used, get_all_filament_usage_for_print, update_layer_tracking, insert_filament_usage
 from logger import log
 from live_tray_resolver import LiveTrayResolver
@@ -75,6 +78,7 @@ def save_checkpoint(*, model_path: str, current_layer: int, task_id, subtask_id,
   existing["gcode_filament_sequence"] = gcode_filament_sequence or []
   existing["gcode_file_name"] = gcode_file_name
   existing["print_id"] = print_id
+  existing.pop("ams_mapping", None)
   _save_checkpoint_metadata(existing)
 
 
@@ -518,6 +522,33 @@ class FilamentUsageTracker:
               subtask_id,
           )
 
+  def apply_ams_mapping(self, ams_mapping: list[int] | None) -> None:
+    """Deprecated: AMS mapping is now resolved live via LiveTrayResolver."""
+    log("[filament-tracker] apply_ams_mapping() called but is now a no-op "
+        "(live resolver handles mapping automatically)")
+
+  def _retrieve_model(self, model_url: str | None) -> str | None:
+    if not model_url:
+      log("[filament-tracker] No model URL provided")
+      return None
+
+    uri = urlparse(model_url)
+    try:
+      with tempfile.NamedTemporaryFile(suffix=".3mf", delete=False) as model_file:
+        if uri.scheme in ("https", "http"):
+          log(f"[filament-tracker] Downloading model via HTTP(S): {model_url}")
+          download3mfFromCloud(model_url, model_file)
+        elif uri.scheme == "local":
+          log(f"[filament-tracker] Loading model from local path: {uri.path}")
+          download3mfFromLocalFilesystem(uri.path, model_file)
+        else:
+          log(f"[filament-tracker] Downloading model via FTP: {model_url}")
+          download3mfFromFTP(model_url.rpartition('/')[-1], model_file) # Pull just filename to clear out any unexpected paths
+        return model_file.name
+    except Exception as exc:
+      log(f"Failed to fetch model: {exc}")
+      return None
+
   def _handle_layer_change(self, new_layer: int) -> None:
     if self.active_model is None:
         return
@@ -861,13 +892,23 @@ class FilamentUsageTracker:
 
   def _extract_gcode_filament_sequence(self) -> list[int]:
     """
-    Returns the FULL swap sequence from the GCode WITH repetitions.
-    Example: filament 0, then 1, then back to 0, then 2 -> [0, 1, 0, 2]
+    Returns the swap sequence for the LiveTrayResolver.
 
-    This is critical for the LiveTrayResolver: it needs to know that
-    a SETTLED event after binding filament 1 should bind filament 0 again
-    (not filament 2), because the GCode repeats filament 0.
+    Preferred source: filament_id_sequence from filament_sequence.json
+    (plate-specific, contains filament IDs directly, e.g. [2, 3, 2, 3, 2]).
+
+    Fallback: M620-derived swap sequence from evaluate_gcode
+    (contains 0-based AMS slot indices, e.g. [1, 2, 1, 2, 1]).
+
+    Using filament IDs directly means filament_index in the resolver
+    IS the filament_id — no tool_index_to_filament_id remapping needed.
     """
+    metadata = self.print_metadata or {}
+    filament_id_sequence = metadata.get("filament_id_sequence")
+    if filament_id_sequence:
+      log(f"[filament-tracker] Using filament_id_sequence from metadata: {filament_id_sequence}")
+      return list(filament_id_sequence)
+    log("[filament-tracker] No filament_id_sequence in metadata, falling back to M620 sequence")
     return list(self._gcode_swap_sequence)
 
   def _bind_initial_spools(self) -> None:
@@ -967,6 +1008,21 @@ class FilamentUsageTracker:
 
   def _resolve_filament_id(self, filament_index: int) -> int | None:
     metadata = self.print_metadata or {}
+
+    # If filament_id_sequence was used, filament_index IS the filament_id directly.
+    if metadata.get("filament_id_sequence"):
+      filaments = metadata.get("filaments") or {}
+      if filament_index in filaments:
+        return int(filament_index)
+      # Try int key lookup
+      try:
+        if int(filament_index) in filaments:
+          return int(filament_index)
+      except (TypeError, ValueError):
+        pass
+      return None
+
+    # Fallback: M620 slot-index mode — look up via tool_index_to_filament_id
     tool_to_filament = metadata.get("tool_index_to_filament_id") or {}
     if tool_to_filament:
       direct = tool_to_filament.get(filament_index)
