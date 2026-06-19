@@ -381,6 +381,10 @@ class PrintContext:
         """
         Downloads the 3mf model and parses it.
         Captures the meta data into the meta dict.
+
+        For LOCAL jobs (file:///userdata/..., i.e. "Erneut drucken"),
+        the URL cannot be fetched remotely. Instead we fall back to the
+        cached 3MF written during the previous LAN/CLOUD print.
         """
         source = self.summary.get("url")
         if not source:
@@ -388,16 +392,48 @@ class PrintContext:
             self.metadata = None
             self.download_done = False
             return
+
+        # ── LOCAL job: cannot fetch the URL, use cached 3MF instead ────────
+        if self.source_type == JOB_TYPE_LOCAL:
+            if MODEL_CACHE_PATH.exists():
+                log(f"[DEBUG] LOCAL job: using cached 3MF at {MODEL_CACHE_PATH}")
+                try:
+                    cached_metadata = getMetaDataFrom3mf(
+                        f"local:{MODEL_CACHE_PATH}",
+                        keep_downloaded_file=True,
+                        downloaded_file_path=str(MODEL_CACHE_PATH),
+                    )
+                    if cached_metadata:
+                        # Ensure downloaded_model_path is always set,
+                        # regardless of keep_downloaded_file flag.
+                        cached_metadata["downloaded_model_path"] = str(MODEL_CACHE_PATH)
+                        self.metadata = cached_metadata
+                        self.download_done = True
+                        log(f"[DEBUG] LOCAL job: cache parsed successfully")
+                    else:
+                        log(f"[WARNING] LOCAL job: cache parse returned empty, cannot track.")
+                        self.metadata = None
+                        self.download_done = False
+                except Exception as exc:
+                    log(f"[WARNING] LOCAL job: cache parse failed: {exc}")
+                    self.metadata = None
+                    self.download_done = False
+            else:
+                log(f"[WARNING] LOCAL job: no cached 3MF at {MODEL_CACHE_PATH}, cannot track.")
+                self.metadata = None
+                self.download_done = False
+            return
+
+        # ── LAN / CLOUD job: download normally ──────────────────────────────
         try:
             self.metadata = getMetaDataFrom3mf(
-            source,
-            keep_downloaded_file=TRACK_LAYER_USAGE,
-            downloaded_file_path=str(MODEL_CACHE_PATH) if TRACK_LAYER_USAGE else None,
+                source,
+                keep_downloaded_file=TRACK_LAYER_USAGE,
+                downloaded_file_path=str(MODEL_CACHE_PATH) if TRACK_LAYER_USAGE else None,
             )
             if self.metadata:
                 log(f"[DEBUG] Metadata downloaded for project-file from {source}")
-                pass
-            self.download_done = True
+            self.download_done = bool(self.metadata)
             return
         except TypeError as exc:
             # Compatibility fallback for tests/patches that still stub an older signature.
@@ -407,10 +443,10 @@ class PrintContext:
                 self.metadata = getMetaDataFrom3mf(source)
             else:
                 raise
-            self.download_done = True
-            return 
+            self.download_done = bool(self.metadata)
+            return
         except Exception as exc:
-            log(f"[WARNING] Metadata download failed ({reason}): {exc}")
+            log(f"[WARNING] Metadata download failed: {exc}")
             self.metadata = None
             self.download_done = False
             return
