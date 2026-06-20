@@ -863,6 +863,9 @@ class FilamentUsageTracker:
     Callback from LiveTrayResolver: called immediately when a
     filament_index -> tray_id binding is confirmed (SETTLED).
 
+    When filament_id_sequence is active, filament_index IS the filament_id.
+    When in legacy M620 mode, filament_index is a tool_index.
+
     1. Binds the spool in the DB right away (so UI shows spool name
        even before the first layer is committed).
     2. Flushes any pending usage accumulated before the binding.
@@ -871,9 +874,20 @@ class FilamentUsageTracker:
 
     # ── 1. Spool binding in DB ───────────────────────────────────────
     if self.print_id:
-      spool_id = self._get_spool_id_for_filament(filament_index)
-      if spool_id is not None:
+      metadata = self.print_metadata or {}
+      using_filament_id_sequence = bool(metadata.get("filament_id_sequence"))
+
+      if using_filament_id_sequence:
+        # filament_index IS the filament_id — look up spool directly by tray
+        tray_uid = self._tray_uid_from_mapping(tray_id)
+        spool_id = self._lookup_spool_for_tray(tray_uid) if tray_uid else None
+        filament_id = filament_index  # already a filament_id
+      else:
+        # legacy mode: filament_index is a tool_index
+        spool_id = self._get_spool_id_for_filament(filament_index)
         filament_id = self._resolve_filament_id(filament_index)
+
+      if spool_id is not None:
         if filament_id is not None:
           update_filament_spool(self.print_id, filament_id, spool_id)
           log(f"[filament-tracker] spool bound: filament_id={filament_id} -> spool_id={spool_id}")
@@ -896,12 +910,11 @@ class FilamentUsageTracker:
 
     Preferred source: filament_id_sequence from filament_sequence.json
     (plate-specific, contains filament IDs directly, e.g. [2, 3, 2, 3, 2]).
+    The resolver will be keyed by filament_id in this mode.
 
     Fallback: M620-derived swap sequence from evaluate_gcode
-    (contains 0-based AMS slot indices, e.g. [1, 2, 1, 2, 1]).
-
-    Using filament IDs directly means filament_index in the resolver
-    IS the filament_id — no tool_index_to_filament_id remapping needed.
+    (contains 0-based tool indices, e.g. [0, 1, 0, 1, 0]).
+    The resolver will be keyed by tool_index in this mode.
     """
     metadata = self.print_metadata or {}
     filament_id_sequence = metadata.get("filament_id_sequence")
@@ -915,12 +928,25 @@ class FilamentUsageTracker:
     if not self.print_id:
       return
 
+    metadata = self.print_metadata or {}
+    using_filament_id_sequence = bool(metadata.get("filament_id_sequence"))
+
     for filament_index in self._total_usage_mm_per_filament:
-      spool_id = self._get_spool_id_for_filament(filament_index)
+      if using_filament_id_sequence:
+        # filament_index IS filament_id; get tray from resolver directly
+        tray_id = self._resolver.resolve(filament_index)
+        if tray_id is None:
+          continue
+        tray_uid = self._tray_uid_from_mapping(tray_id)
+        spool_id = self._lookup_spool_for_tray(tray_uid) if tray_uid else None
+        filament_id = filament_index
+      else:
+        spool_id = self._get_spool_id_for_filament(filament_index)
+        filament_id = self._resolve_filament_id(filament_index)
+
       if spool_id is None:
         continue
 
-      filament_id = self._resolve_filament_id(filament_index)
       if filament_id is not None:
         update_filament_spool(self.print_id, filament_id, spool_id)
       else:
@@ -988,6 +1014,13 @@ class FilamentUsageTracker:
   def _resolve_tray_mapping(self, filament_index: int) -> int | None:
     """Resolve filament_index -> mapping_value via LiveTrayResolver.
 
+    When filament_id_sequence is in use, the resolver is keyed by filament_id
+    (e.g. {2: 1, 3: 2}), but the GCode parser emits tool-indices (0, 1, ...).
+    We must translate tool_index -> filament_id first, then ask the resolver.
+
+    When filament_id_sequence is NOT in use (legacy M620 mode), the resolver
+    is keyed by the raw GCode filament_index, so we pass it through directly.
+
     parse_ams_mapping_value() heuristic (spoolman_service.py):
       v < 128  ->  ams_id = v // 4,  slot_id = v % 4
       v == 254 ->  external spool
@@ -998,7 +1031,16 @@ class FilamentUsageTracker:
 
     So tray_id IS the mapping_value directly for AMS trays 0-127.
     """
-    tray_id = self._resolver.resolve(filament_index)
+    metadata = self.print_metadata or {}
+    if metadata.get("filament_id_sequence"):
+      # Resolver is keyed by filament_id — translate tool_index first.
+      resolver_key = self._resolve_filament_id(filament_index)
+      if resolver_key is None:
+        return None
+    else:
+      resolver_key = filament_index
+
+    tray_id = self._resolver.resolve(resolver_key)
     if tray_id is None:
       return None  # not yet confirmed -- caller buffers usage
     if tray_id == 254:  # external spool sentinel
@@ -1008,21 +1050,6 @@ class FilamentUsageTracker:
 
   def _resolve_filament_id(self, filament_index: int) -> int | None:
     metadata = self.print_metadata or {}
-
-    # If filament_id_sequence was used, filament_index IS the filament_id directly.
-    if metadata.get("filament_id_sequence"):
-      filaments = metadata.get("filaments") or {}
-      if filament_index in filaments:
-        return int(filament_index)
-      # Try int key lookup
-      try:
-        if int(filament_index) in filaments:
-          return int(filament_index)
-      except (TypeError, ValueError):
-        pass
-      return None
-
-    # Fallback: M620 slot-index mode — look up via tool_index_to_filament_id
     tool_to_filament = metadata.get("tool_index_to_filament_id") or {}
     if tool_to_filament:
       direct = tool_to_filament.get(filament_index)
