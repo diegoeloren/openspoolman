@@ -57,6 +57,7 @@ _AMS_STABLE_MASK     = 0x300   # bits 9+8 both set
 _AMS_SWAPPING_BIT    = 0x100   # bit 8 set, bit 9 clear → swap running
 _AMS_TRAY_EXTERNAL   = 254     # bambu external spool tray id
 _AMS_TRAY_SENTINEL   = 255     # "in transit" sentinel value
+_AMS_STAR_NO_TARGET  = 0xFF00  # 65280 = extruder idle / no target set
 
 
 def _ams_is_stable(ams_status: int | None) -> bool:
@@ -82,6 +83,17 @@ def _tray_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _star_is_valid(star) -> bool:
+    """True when star is a real tray target (not idle/sentinel/external)."""
+    if star is None:
+        return False
+    try:
+        s = int(star)
+    except (TypeError, ValueError):
+        return False
+    return s != _AMS_TRAY_SENTINEL and s != _AMS_STAR_NO_TARGET
 
 
 class LiveTrayResolver:
@@ -214,7 +226,7 @@ class LiveTrayResolver:
         # is the authoritative target tray.
         if (
             star is not None
-            and star != _AMS_TRAY_SENTINEL  # 255 = no target
+            and _star_is_valid(star)  # ignore sentinel/idle values
             and star != self._prev_star
             and self._prev_star is not None
         ):
@@ -236,7 +248,7 @@ class LiveTrayResolver:
                 log(f"[LiveTrayResolver] star updated mid-swap: "
                     f"{self._prev_star}→{star} "
                     f"(pending filament_index={self._pending_filament_index})")
-        self._pending_star = star if (star is not None and star != _AMS_TRAY_SENTINEL) else self._pending_star
+        self._pending_star = star if _star_is_valid(star) else self._pending_star
 
         # ── Detect SETTLED: ams_status stable AND tray_pre == tray_now ──────
         if (
